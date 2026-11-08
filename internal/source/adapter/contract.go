@@ -23,7 +23,6 @@ const (
 	PiJSONLSource          = "pi-jsonl"
 	OMPJSONLSource         = "omp-jsonl"
 	CodeBuddyHistorySource = "codebuddy-history"
-	CodeBuddyJSONSource    = "codebuddy-json"
 	OpenCodeSQLiteSource   = "opencode-sqlite"
 	// CursorDashboardAPISource identifies the account-level Cursor network
 	// source. It is deliberately NOT a compiled-in local file adapter: it

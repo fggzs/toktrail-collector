@@ -1,4 +1,4 @@
-package codebuddyjson
+package codebuddyhistory
 
 import (
 	"context"
@@ -111,7 +111,8 @@ func TestLoadRecordsParsesConversationIndexes(t *testing.T) {
 	if len(result.Records) != 2 {
 		t.Fatalf("expected 2 records, got %d (%#v)", len(result.Records), result.Records)
 	}
-	// r6 has no stable id; r3/r4/r5 carry nothing to account for.
+	// The request without a stable id is quarantined; the streaming, all-zero
+	// and canceled turns carry nothing to account for.
 	if result.Quarantined != 1 {
 		t.Fatalf("expected 1 quarantined request, got %d", result.Quarantined)
 	}
@@ -132,8 +133,8 @@ func TestLoadRecordsParsesConversationIndexes(t *testing.T) {
 		t.Fatalf("unexpected occurredAt %q", got)
 	}
 	for _, record := range result.Records {
-		if got := adapter.StringField(record, "tool"); got != cbTool {
-			t.Fatalf("tool = %q want %q", got, cbTool)
+		if got := adapter.StringField(record, "tool"); got != codebuddyTool {
+			t.Fatalf("tool = %q want %q", got, codebuddyTool)
 		}
 		if got := adapter.StringField(record, "model"); got != "hy4-preview-ioa" {
 			t.Fatalf("model = %q want the recorded modelId", got)
@@ -141,23 +142,28 @@ func TestLoadRecordsParsesConversationIndexes(t *testing.T) {
 		if got := adapter.StringField(record, "kind"); got != "delta" {
 			t.Fatalf("kind = %q want delta", got)
 		}
-		if got := adapter.StringField(record, "sourceType"); got != adapter.CodeBuddyJSONSource {
+		if got := adapter.StringField(record, "sourceType"); got != adapter.CodeBuddyHistorySource {
 			t.Fatalf("sourceType = %q", got)
 		}
-		if got := adapter.StringField(record, "adapterVersion"); got != cbAdapterVersion {
+		if got := adapter.StringField(record, "adapterVersion"); got != codebuddyAdapterVersion {
 			t.Fatalf("adapterVersion = %q", got)
 		}
 		if record["resetKey"] != nil {
 			t.Fatalf("resetKey must stay nil for delta records")
 		}
 	}
-	if adapter.StringField(first, "groupKey") != adapter.StringField(second, "groupKey") {
-		t.Fatalf("records of one conversation must share a group key")
-	}
+	// Identity stays on the codebuddy-history-v1 rule: both keys hash the
+	// "<conversation>/<request>" pair, so they differ per request.
 	if adapter.StringField(first, "recordKey") == adapter.StringField(second, "recordKey") {
 		t.Fatalf("record keys must be distinct per request")
 	}
-	// r1: cached 240576 + 0 written, uncached 81604 out of 322180 prompt.
+	if adapter.StringField(first, "groupKey")[0:len("codebuddy-request:")] != "codebuddy-request:" {
+		t.Fatalf("group keys must keep the codebuddy-request domain")
+	}
+	if adapter.StringField(first, "recordKey")[0:len("codebuddy-history:")] != "codebuddy-history:" {
+		t.Fatalf("record keys must keep the codebuddy-history domain")
+	}
+	// r1: cached 240576, uncached 81604 out of 322180 prompt.
 	if got := adapter.StringField(first, "input"); got != "81604" {
 		t.Fatalf("r1 input = %q", got)
 	}
@@ -200,7 +206,7 @@ func TestLoadRecordsReportsUnknownModelWithoutQuarantine(t *testing.T) {
 		t.Fatalf("expected 1 quarantined request, got %d", result.Quarantined)
 	}
 	for _, record := range result.Records {
-		if got := adapter.StringField(record, "model"); got != "unknown" {
+		if got := adapter.StringField(record, "model"); got != codebuddyUnknownModel {
 			t.Fatalf("model = %q want unknown", got)
 		}
 	}
@@ -227,7 +233,7 @@ func TestLoadRecordsIgnoresForeignModelAttribution(t *testing.T) {
 	if len(result.Records) != 1 {
 		t.Fatalf("expected 1 record, got %d", len(result.Records))
 	}
-	if got := adapter.StringField(result.Records[0], "model"); got != "unknown" {
+	if got := adapter.StringField(result.Records[0], "model"); got != codebuddyUnknownModel {
 		t.Fatalf("model = %q want unknown", got)
 	}
 }
@@ -365,13 +371,9 @@ func TestLoadRecordsQuarantinesContradictoryUsage(t *testing.T) {
 	}
 }
 
-func TestLoadRecordsMissingRootIsEmpty(t *testing.T) {
-	result, err := LoadRecords(filepath.Join(t.TempDir(), "not-installed"))
-	if err != nil {
-		t.Fatalf("missing root must not fail: %v", err)
-	}
-	if len(result.Records) != 0 || result.Quarantined != 0 || len(result.Issues) != 0 {
-		t.Fatalf("expected an empty result, got %#v", result)
+func TestLoadRecordsMissingRootFailsClosed(t *testing.T) {
+	if _, err := LoadRecords(filepath.Join(t.TempDir(), "not-installed")); err == nil {
+		t.Fatal("a missing granted path must surface as an error, not an empty result")
 	}
 	// An empty path is a caller mistake, not an empty install.
 	if _, err := LoadRecords("   "); err == nil {
@@ -439,7 +441,7 @@ func TestFilterForExportDropsKnownHistory(t *testing.T) {
 	}
 	store := quarantine.New(stateDir)
 	if err := store.Append([]quarantine.Entry{{
-		Source:    adapter.CodeBuddyJSONSource,
+		Source:    adapter.CodeBuddyHistorySource,
 		RecordKey: key,
 		Record:    raw,
 		Reason:    "test",
@@ -468,6 +470,58 @@ func TestFilterForExportDropsKnownHistory(t *testing.T) {
 	}
 }
 
+// TestFilterForExportKeepsLegacyV1RecordsDeduplicated pins the version
+// migration: a codebuddy-history-v1 export of the same request differs only by
+// the model this build can now resolve, so it must stay filtered instead of
+// failing the immutable-history guard.
+func TestFilterForExportKeepsLegacyV1RecordsDeduplicated(t *testing.T) {
+	root := t.TempDir()
+	conversationFixture(t, root, "p1", "c1", realIndex)
+	indexPath := filepath.Join(root, "p1", "c1", indexFileName)
+	messageFixture(t, indexPath, "m2", "assistant", extraFixture(t, "r1", "hy4-preview-ioa"))
+
+	result, err := LoadRecords(root)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	stateDir := t.TempDir()
+	record := result.Records[0]
+	key := adapter.StringField(record, "recordKey")
+	if adapter.StringField(record, "model") != "hy4-preview-ioa" {
+		t.Fatalf("fixture must resolve a model, got %q", adapter.StringField(record, "model"))
+	}
+
+	legacy := adapter.Record{}
+	for field, value := range record {
+		legacy[field] = value
+	}
+	legacy["model"] = codebuddyUnknownModel
+	legacy["adapterVersion"] = codebuddyLegacyAdapterVersion
+	raw, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := quarantine.New(stateDir)
+	if err := store.Append([]quarantine.Entry{{
+		Source:    adapter.CodeBuddyHistorySource,
+		RecordKey: key,
+		Record:    raw,
+		Reason:    "test",
+	}}); err != nil {
+		t.Fatalf("seed quarantine: %v", err)
+	}
+
+	fresh, err := filterKnownRecordsContext(context.Background(), stateDir, result.Records)
+	if err != nil {
+		t.Fatalf("a legacy v1 export of the same request must not fail the filter: %v", err)
+	}
+	for _, entry := range fresh {
+		if adapter.StringField(entry, "recordKey") == key {
+			t.Fatalf("legacy v1 record must stay deduplicated")
+		}
+	}
+}
+
 func TestFilterForExportWithoutStateDirKeepsRecords(t *testing.T) {
 	root := t.TempDir()
 	conversationFixture(t, root, "p1", "c1", realIndex)
@@ -475,7 +529,7 @@ func TestFilterForExportWithoutStateDirKeepsRecords(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	fresh, err := Adapter().FilterForExport(adapter.Options{Source: adapter.CodeBuddyJSONSource, Input: root}, result.Records)
+	fresh, err := Adapter().FilterForExport(adapter.Options{Source: adapter.CodeBuddyHistorySource, Input: root}, result.Records)
 	if err != nil {
 		t.Fatalf("filter: %v", err)
 	}

@@ -68,7 +68,7 @@ Registry construction rejects empty identifiers and duplicate registrations. Reg
 
 ## Compatibility boundaries
 
-Source identifiers and their discovery order are `usage-json`, `codex-jsonl`, `claude-code-jsonl`, `deepseek-harness`, `workbuddy-jsonl`, `qwen-jsonl`, `kimi-cli-jsonl`, `kimi-code-jsonl`, `zcode-sqlite`, `hermes-sqlite`, `openclaw-sqlite`, `pi-jsonl`, `omp-jsonl`, and `codebuddy-json`. Record keys, grouping hashes, adapter version strings, batch identifiers, and persistent ledger formats remain stable. The files `adapter-cursors.json`, `outbox.json`, `scope-quarantine.json`, and `export-transaction.json` retain their existing formats.
+Source identifiers and their discovery order are `usage-json`, `codex-jsonl`, `claude-code-jsonl`, `deepseek-harness`, `workbuddy-jsonl`, `qwen-jsonl`, `kimi-cli-jsonl`, `kimi-code-jsonl`, `zcode-sqlite`, `hermes-sqlite`, `openclaw-sqlite`, `pi-jsonl`, `omp-jsonl`, `codebuddy-history`, and `opencode-sqlite`. Record keys, grouping hashes, adapter version strings, batch identifiers, and persistent ledger formats remain stable. The files `adapter-cursors.json`, `outbox.json`, `scope-quarantine.json`, and `export-transaction.json` retain their existing formats.
 
 When the device-grant protocol supplies an explicit tool list, an existing generic `usage-json` grant is conservatively skipped because its file can contain records for arbitrary tools and the source cannot be mapped to a single authorized tool before reading. Its files, progress, and outbox are not deleted. Unrestricted or legacy-server scopes retain the previous behavior. To collect a supported tool under a restricted scope, use its explicitly authorized built-in source.
 

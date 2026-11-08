@@ -22,8 +22,7 @@ Supported sources in the current implementation:
 - OpenClaw SQLite (`openclaw-sqlite`): passive `transcript_events.event_json` usage events only.
 - Pi session JSONL (`pi-jsonl`): assistant message plus usage/model_usage entry counters only.
 - Oh My Pi session JSONL (`omp-jsonl`): same format as Pi, read under `~/.omp`.
-- CodeBuddy conversation index JSON (`codebuddy-json`, default for the CodeBuddy tool): per-request counters from each conversation's `index.json`, plus the recorded model identifier from `messages/*.json`.
-- CodeBuddy IDE session history (`codebuddy-history`): passive per-request usage counters from `index.json` files under the CodeBuddy IDE local data directory; completed requests only, conversation bodies are never read.
+- CodeBuddy IDE session history (`codebuddy-history`): passive per-request usage counters from `index.json` files under the CodeBuddy IDE local data directory, plus the recorded model identifier and legacy turn timestamps resolved from the per-message files; completed requests only, conversation bodies are never read.
 - OpenCode CLI session SQLite (`opencode-sqlite`): passive assistant-message usage counters from `~/.local/share/opencode/opencode.db`; message bodies are never read.
 - Synthetic/free-form `usage-json` fixtures for integration and compatibility testing.
 
@@ -280,15 +279,15 @@ Pi / Oh My Pi specifics:
 Scan and export CodeBuddy usage from its extension data directory:
 
 ```sh
-go run ./cmd/toktrail scan --source codebuddy-json --input "$HOME/AppData/Local/CodeBuddyExtension/Data"
-go run ./cmd/toktrail export --source codebuddy-json --input "$HOME/AppData/Local/CodeBuddyExtension/Data" --out ./codebuddy-batch.json --batch codebuddy-demo-1
+go run ./cmd/toktrail scan --source codebuddy-history --input "$HOME/AppData/Local/CodeBuddyExtension/Data"
+go run ./cmd/toktrail export --source codebuddy-history --input "$HOME/AppData/Local/CodeBuddyExtension/Data" --out ./codebuddy-batch.json --batch codebuddy-demo-1
 ```
 
 CodeBuddy specifics:
 
-- CodeBuddy writes one conversation index per conversation (`<project>/<conversationId>/index.json`). Only indexes that sit beside a `messages` directory are treated as conversations, so workspace-level conversation lists (`history/<project>/index.json`), `current.json`, and `recent.json` are never read as usage.
+- CodeBuddy writes one conversation index per conversation (`history/<project>/<conversationId>/index.json`). Only indexes proven to be a conversation are read: either they sit at that `history/<project>/<conversationId>` depth, or they sit beside a `messages` directory. Workspace-level conversation lists (`history/<project>/index.json`), `current.json`, and `recent.json` are never read as usage.
 - Each `requests[]` entry is one user turn and is uploaded as a `delta` record. `inputTokens` is the total prompt of the turn; `cacheTokens` / `cachedWriteTokens` are the cached shares and the uncached share becomes the uploaded `input`. A zero `cachedMissTokens` means "not reported" (the client writes zeros when usage is not broken down), so it is never read as "the whole prompt is uncached".
-- Turns that are not in a terminal state are skipped until a later scan sees them complete, so a growing counter set is never exported. Contradictory counters (cache above the prompt, total disagreeing with prompt plus output, fractional or negative values) quarantine the request instead of uploading.
+- Only requests recorded as `complete` are collected; running requests publish partial snapshots and canceled requests lack a `startedAt`, so both are skipped and a growing counter set is never exported. Contradictory counters (cache above the prompt, total disagreeing with prompt plus output, fractional or negative values) quarantine the request instead of uploading.
 - Recent indexes record `startedAt` in epoch milliseconds. Older conversations record no per-turn timestamp and no message `createdAt`, so the collector uses the modification time of the turn's first message file (the client writes that file when the turn starts); a turn with neither is quarantined instead of uploaded with an invented time.
 - Older conversations also keep `{"inputTokens":null,...}` placeholders for turns that never recorded counts. Those rows account for nothing and are skipped, not quarantined.
 - The model identifier is not in `index.json`. It is read from the turn's first attributable assistant message (`extra.modelId`, matched by `extra.requestId`); if nothing is attributable the record reports `unknown` and a value-free local issue, never a guess.
@@ -337,7 +336,6 @@ go run ./cmd/toktrail service install \
   --grant openclaw-sqlite=$HOME/.openclaw/agents \
   --grant pi-jsonl=$HOME/.pi/agent/sessions \
   --grant omp-jsonl=$HOME/.omp/agent/sessions \
-  --grant codebuddy-json=$HOME/AppData/Local/CodeBuddyExtension/Data \
   --grant codebuddy-history=$HOME/AppData/Local/CodeBuddyExtension/Data \
   --grant opencode-sqlite=$HOME/.local/share/opencode \
   --interval 30m
