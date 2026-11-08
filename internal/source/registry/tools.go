@@ -121,14 +121,29 @@ var supportedTools = []ToolSpec{
 	},
 	{
 		// CodeBuddy keeps its conversation indexes under the per-user
-		// extension data directory. The adapter walks the granted root and
-		// only treats indexes that sit beside a messages directory as
-		// conversations, so the platform-specific user-id nesting is
-		// discovery detail, not a required default path.
+		// extension data directory. Both compiled-in adapters walk the
+		// granted root and only treat indexes that sit beside a messages
+		// directory as conversations, so the platform-specific user-id
+		// nesting is discovery detail, not a required default path. The
+		// default source is codebuddy-json because it also resolves the
+		// recorded model identifier from messages/*.json; codebuddy-history
+		// stays selectable as an alternative source.
 		Tool:           "CodeBuddy",
-		Aliases:        []string{"codebuddy", "code buddy", "codebuddy cn", "codebuddy-cn", "codebuddy ide"},
+		Aliases:        []string{"codebuddy", "code buddy", "codebuddy cn", "codebuddy-cn", "codebuddycn", "codebuddy ide", "codebuddy-ide", "codebuddyide", "腾讯云代码助手"},
 		Source:         adapter.CodeBuddyJSONSource,
 		DefaultSubpath: []string{"AppData", "Local", "CodeBuddyExtension", "Data"},
+		Mode:           ModeLocal,
+	},
+	{
+		// OpenCode CLI stores every conversation message in one SQLite
+		// database at ~/.local/share/opencode/opencode.db; the adapter reads
+		// per-request usage counters from assistant rows in session_message
+		// through a read-only immutable DSN and never writes to the
+		// directory.
+		Tool:           "OpenCode",
+		Aliases:        []string{"opencode", "open code", "open-code", "opencodecli", "opencode cli", "sst opencode"},
+		Source:         adapter.OpenCodeSQLiteSource,
+		DefaultSubpath: []string{".local", "share", "opencode"},
 		Mode:           ModeLocal,
 	},
 	{

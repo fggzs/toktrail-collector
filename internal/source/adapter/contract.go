@@ -9,20 +9,22 @@ import (
 )
 
 const (
-	UsageJSONSource       = "usage-json"
-	CodexJSONLSource      = "codex-jsonl"
-	ClaudeCodeJSONLSource = "claude-code-jsonl"
-	DeepSeekHarnessSource = "deepseek-harness"
-	WorkBuddyJSONLSource  = "workbuddy-jsonl"
-	QwenJSONLSource       = "qwen-jsonl"
-	KimiCLIJSONLSource    = "kimi-cli-jsonl"
-	KimiCodeJSONLSource   = "kimi-code-jsonl"
-	ZCodeSQLiteSource     = "zcode-sqlite"
-	HermesSQLiteSource    = "hermes-sqlite"
-	OpenClawSQLiteSource  = "openclaw-sqlite"
-	PiJSONLSource         = "pi-jsonl"
-	OMPJSONLSource        = "omp-jsonl"
-	CodeBuddyJSONSource   = "codebuddy-json"
+	UsageJSONSource        = "usage-json"
+	CodexJSONLSource       = "codex-jsonl"
+	ClaudeCodeJSONLSource  = "claude-code-jsonl"
+	DeepSeekHarnessSource  = "deepseek-harness"
+	WorkBuddyJSONLSource   = "workbuddy-jsonl"
+	QwenJSONLSource        = "qwen-jsonl"
+	KimiCLIJSONLSource     = "kimi-cli-jsonl"
+	KimiCodeJSONLSource    = "kimi-code-jsonl"
+	ZCodeSQLiteSource      = "zcode-sqlite"
+	HermesSQLiteSource     = "hermes-sqlite"
+	OpenClawSQLiteSource   = "openclaw-sqlite"
+	PiJSONLSource          = "pi-jsonl"
+	OMPJSONLSource         = "omp-jsonl"
+	CodeBuddyHistorySource = "codebuddy-history"
+	CodeBuddyJSONSource    = "codebuddy-json"
+	OpenCodeSQLiteSource   = "opencode-sqlite"
 	// CursorDashboardAPISource identifies the account-level Cursor network
 	// source. It is deliberately NOT a compiled-in local file adapter: it
 	// never appears in the local grants store (whose validation requires

@@ -22,7 +22,9 @@ Supported sources in the current implementation:
 - OpenClaw SQLite (`openclaw-sqlite`): passive `transcript_events.event_json` usage events only.
 - Pi session JSONL (`pi-jsonl`): assistant message plus usage/model_usage entry counters only.
 - Oh My Pi session JSONL (`omp-jsonl`): same format as Pi, read under `~/.omp`.
-- CodeBuddy conversation index JSON (`codebuddy-json`): per-request counters from each conversation's `index.json`, plus the recorded model identifier from `messages/*.json`.
+- CodeBuddy conversation index JSON (`codebuddy-json`, default for the CodeBuddy tool): per-request counters from each conversation's `index.json`, plus the recorded model identifier from `messages/*.json`.
+- CodeBuddy IDE session history (`codebuddy-history`): passive per-request usage counters from `index.json` files under the CodeBuddy IDE local data directory; completed requests only, conversation bodies are never read.
+- OpenCode CLI session SQLite (`opencode-sqlite`): passive assistant-message usage counters from `~/.local/share/opencode/opencode.db`; message bodies are never read.
 - Synthetic/free-form `usage-json` fixtures for integration and compatibility testing.
 
 The collector uploads token usage counters, stable privacy-safe record identifiers, and source-specific model identifiers described below. It must not upload prompts, message bodies, raw session IDs, raw message IDs, or absolute local paths.
@@ -239,6 +241,34 @@ go run ./cmd/toktrail scan --source omp-jsonl --input ~/.omp/agent/sessions
 go run ./cmd/toktrail export --source omp-jsonl --input ~/.omp/agent/sessions --out ./omp-batch.json --batch omp-demo-1
 ```
 
+Scan and export CodeBuddy IDE usage from a local directory:
+
+```sh
+go run ./cmd/toktrail scan --source codebuddy-history --input "~/AppData/Local/CodeBuddyExtension/Data"
+go run ./cmd/toktrail export --source codebuddy-history --input "~/AppData/Local/CodeBuddyExtension/Data" --out ./codebuddy-batch.json --batch codebuddy-demo-1
+```
+
+Scan and export OpenCode usage from a local directory:
+
+```sh
+go run ./cmd/toktrail scan --source opencode-sqlite --input ~/.local/share/opencode
+go run ./cmd/toktrail export --source opencode-sqlite --input ~/.local/share/opencode --out ./opencode-batch.json --batch opencode-demo-1
+```
+
+OpenCode specifics:
+
+- OpenCode stores every conversation message in one SQLite database at `~/.local/share/opencode/opencode.db`. The adapter reads only assistant rows in the `session_message` table, which is the current layout's authoritative message store and a superset of the legacy `message` table, so reading it alone avoids double counting.
+- OpenCode usage uses OpenAI-style disjoint buckets: `tokens.input` excludes cache reads, `tokens.cache.read`/`write` are listed separately, and `tokens.reasoning` is an informational subset of `output` that is not uploaded separately. The four uploaded buckets are verbatim `input`/`cacheRead`/`cacheWrite`/`output`.
+- Reads use a read-only immutable SQLite DSN to avoid creating sidecar files in the live OpenCode directory. WAL-only commits may appear on the next scheduled read after checkpointing.
+- The `model` field is recorded as `providerID/modelID` when attribution is present; messages without it report `unknown`.
+
+CodeBuddy specifics:
+
+- CodeBuddy IDE (CodeBuddy CN) stores one `index.json` per conversation under `~/AppData/Local/CodeBuddyExtension/Data/<userId>/CodeBuddyIDE/<userId>/history/<workspace>/<conversation>/`. The adapter discovers every such index below the granted path and reads only `requests[].usage` counters; `messages/*.json` conversation bodies are never read.
+- Only `state == "complete"` requests are collected. Running requests publish partial usage snapshots that would double count once the request completes, and canceled requests lack a `startedAt` timestamp.
+- CodeBuddy semantics verified against real histories: `inputTokens` is the total input including cache reads, so the adapter uploads net `input` (`cachedMissTokens`), `cacheRead` (`cacheTokens`), and `cacheWrite` (`cachedWriteTokens`) separately; `totalTokens` must equal `inputTokens + outputTokens` and the cache split must sum to `inputTokens`, otherwise the request is quarantined.
+- The request index does not record model identifiers, so every CodeBuddy record reports `model: unknown` until a future format adds attribution.
+
 Pi / Oh My Pi specifics:
 
 - Pi (badlogic/pi-mono, now earendil-works/pi) and Oh My Pi (omp, a can1357 fork) write the same JSONL session format. They register as two separate sources, `pi-jsonl` and `omp-jsonl`, with default roots `~/.pi/agent/sessions` and `~/.omp/agent/sessions`.
@@ -308,6 +338,8 @@ go run ./cmd/toktrail service install \
   --grant pi-jsonl=$HOME/.pi/agent/sessions \
   --grant omp-jsonl=$HOME/.omp/agent/sessions \
   --grant codebuddy-json=$HOME/AppData/Local/CodeBuddyExtension/Data \
+  --grant codebuddy-history=$HOME/AppData/Local/CodeBuddyExtension/Data \
+  --grant opencode-sqlite=$HOME/.local/share/opencode \
   --interval 30m
 ```
 
