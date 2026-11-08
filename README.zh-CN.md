@@ -22,7 +22,9 @@ Collector 的设计目标是：即使没有账号，本地检查仍然可用。`
 - OpenClaw SQLite（`openclaw-sqlite`）：仅读取 `transcript_events.event_json` 用量事件。
 - Pi session JSONL（`pi-jsonl`）：仅读取 assistant message 与 usage/model_usage 条目计数。
 - Oh My Pi session JSONL（`omp-jsonl`）：与 Pi 相同格式，读取 `~/.omp` 下的会话。
-- CodeBuddy 会话索引 JSON（`codebuddy-json`）：读取每个会话目录下 `index.json` 的按请求计数，以及 `messages/*.json` 中记录的模型标识。
+- CodeBuddy 会话索引 JSON（`codebuddy-json`，CodeBuddy 工具的默认采集源）：读取每个会话目录下 `index.json` 的按请求计数，以及 `messages/*.json` 中记录的模型标识。
+- CodeBuddy IDE 会话历史（`codebuddy-history`）：被动读取 CodeBuddy IDE 本地数据目录下 `index.json` 的每请求用量计数；仅采集已完成请求，不读取对话正文。
+- OpenCode CLI 会话 SQLite（`opencode-sqlite`）：被动读取 `~/.local/share/opencode/opencode.db` 中 assistant 消息的用量计数；不读取消息正文。
 - 用于集成与兼容测试的合成/自由格式 `usage-json`。
 
 Collector 上传 Token 使用计数、稳定的隐私安全记录标识，以及下文说明的各采集源模型标识。它不得上传 prompt、消息正文、原始 session ID、原始 message ID 或本地绝对路径。
@@ -305,6 +307,8 @@ go run ./cmd/toktrail service install \
   --grant pi-jsonl=$HOME/.pi/agent/sessions \
   --grant omp-jsonl=$HOME/.omp/agent/sessions \
   --grant codebuddy-json=$HOME/AppData/Local/CodeBuddyExtension/Data \
+  --grant codebuddy-history=$HOME/AppData/Local/CodeBuddyExtension/Data \
+  --grant opencode-sqlite=$HOME/.local/share/opencode \
   --interval 30m
 ```
 
