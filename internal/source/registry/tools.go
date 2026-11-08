@@ -120,17 +120,15 @@ var supportedTools = []ToolSpec{
 		Mode:           ModeLocal,
 	},
 	{
-		// CodeBuddy keeps its conversation indexes under the per-user
-		// extension data directory. Both compiled-in adapters walk the
-		// granted root and only treat indexes that sit beside a messages
-		// directory as conversations, so the platform-specific user-id
-		// nesting is discovery detail, not a required default path. The
-		// default source is codebuddy-json because it also resolves the
-		// recorded model identifier from messages/*.json; codebuddy-history
-		// stays selectable as an alternative source.
+		// CodeBuddy IDE (CodeBuddy CN) stores per-request usage counters in
+		// its local session history under the user's AppData directory; the
+		// adapter discovers .../history/<workspace>/<conversation>/index.json
+		// below whatever ancestor is granted, and also resolves the recorded
+		// model identifier from messages/*.json. Conversation bodies are
+		// never read, and only completed requests are collected.
 		Tool:           "CodeBuddy",
 		Aliases:        []string{"codebuddy", "code buddy", "codebuddy cn", "codebuddy-cn", "codebuddycn", "codebuddy ide", "codebuddy-ide", "codebuddyide", "腾讯云代码助手"},
-		Source:         adapter.CodeBuddyJSONSource,
+		Source:         adapter.CodeBuddyHistorySource,
 		DefaultSubpath: []string{"AppData", "Local", "CodeBuddyExtension", "Data"},
 		Mode:           ModeLocal,
 	},
