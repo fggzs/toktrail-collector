@@ -120,6 +120,18 @@ var supportedTools = []ToolSpec{
 		Mode:           ModeLocal,
 	},
 	{
+		// CodeBuddy keeps its conversation indexes under the per-user
+		// extension data directory. The adapter walks the granted root and
+		// only treats indexes that sit beside a messages directory as
+		// conversations, so the platform-specific user-id nesting is
+		// discovery detail, not a required default path.
+		Tool:           "CodeBuddy",
+		Aliases:        []string{"codebuddy", "code buddy", "codebuddy cn", "codebuddy-cn", "codebuddy ide"},
+		Source:         adapter.CodeBuddyJSONSource,
+		DefaultSubpath: []string{"AppData", "Local", "CodeBuddyExtension", "Data"},
+		Mode:           ModeLocal,
+	},
+	{
 		// Cursor is the first account-level network source: usage is
 		// collected by direct authenticated requests to the Cursor
 		// dashboard API using the locally confirmed desktop login. It
