@@ -64,6 +64,11 @@ func TestLookupTool(t *testing.T) {
 		{"oh-my-pi", "Oh My Pi", "omp-jsonl", true},
 		{"ohmypi", "Oh My Pi", "omp-jsonl", true},
 		{"  Oh My Pi  ", "Oh My Pi", "omp-jsonl", true},
+		{"CodeBuddy", "CodeBuddy", "codebuddy-json", true},
+		{"codebuddy", "CodeBuddy", "codebuddy-json", true},
+		{"code buddy", "CodeBuddy", "codebuddy-json", true},
+		{"codebuddy cn", "CodeBuddy", "codebuddy-json", true},
+		{"  CodeBuddy  ", "CodeBuddy", "codebuddy-json", true},
 		{"Cursor", "Cursor", "cursor-dashboard-api", true},
 		{"cursor", "Cursor", "cursor-dashboard-api", true},
 		{"  cursor  ", "Cursor", "cursor-dashboard-api", true},
@@ -204,6 +209,16 @@ func TestResolveDefaultInput(t *testing.T) {
 	}
 	resolved = spec.ResolveDefaultInput(home)
 	expected = filepath.Join("test", "home", ".omp", "agent", "sessions")
+	if resolved != expected {
+		t.Errorf("expected %q, got %q", expected, resolved)
+	}
+
+	spec, found = LookupTool("CodeBuddy")
+	if !found {
+		t.Fatal("CodeBuddy not found")
+	}
+	resolved = spec.ResolveDefaultInput(home)
+	expected = filepath.Join("test", "home", "AppData", "Local", "CodeBuddyExtension", "Data")
 	if resolved != expected {
 		t.Errorf("expected %q, got %q", expected, resolved)
 	}

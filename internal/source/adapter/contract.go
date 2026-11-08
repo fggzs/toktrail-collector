@@ -22,6 +22,7 @@ const (
 	OpenClawSQLiteSource  = "openclaw-sqlite"
 	PiJSONLSource         = "pi-jsonl"
 	OMPJSONLSource        = "omp-jsonl"
+	CodeBuddyJSONSource   = "codebuddy-json"
 	// CursorDashboardAPISource identifies the account-level Cursor network
 	// source. It is deliberately NOT a compiled-in local file adapter: it
 	// never appears in the local grants store (whose validation requires
