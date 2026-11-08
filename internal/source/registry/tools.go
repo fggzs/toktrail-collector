@@ -120,6 +120,30 @@ var supportedTools = []ToolSpec{
 		Mode:           ModeLocal,
 	},
 	{
+		// CodeBuddy IDE (CodeBuddy CN) stores per-request usage counters in
+		// its local session history under the user's AppData directory; the
+		// adapter discovers .../history/<workspace>/<conversation>/index.json
+		// below whatever ancestor is granted. Conversation bodies are never
+		// read, and only completed requests are collected.
+		Tool:           "CodeBuddy",
+		Aliases:        []string{"codebuddy", "codebuddy cn", "codebuddy-ide", "codebuddyide", "code buddy", "codebuddycn", "腾讯云代码助手"},
+		Source:         adapter.CodeBuddyHistorySource,
+		DefaultSubpath: []string{"AppData", "Local", "CodeBuddyExtension", "Data"},
+		Mode:           ModeLocal,
+	},
+	{
+		// OpenCode CLI stores every conversation message in one SQLite
+		// database at ~/.local/share/opencode/opencode.db; the adapter reads
+		// per-request usage counters from assistant rows in session_message
+		// through a read-only immutable DSN and never writes to the
+		// directory.
+		Tool:           "OpenCode",
+		Aliases:        []string{"opencode", "open code", "open-code", "opencodecli", "opencode cli", "sst opencode"},
+		Source:         adapter.OpenCodeSQLiteSource,
+		DefaultSubpath: []string{".local", "share", "opencode"},
+		Mode:           ModeLocal,
+	},
+	{
 		// Cursor is the first account-level network source: usage is
 		// collected by direct authenticated requests to the Cursor
 		// dashboard API using the locally confirmed desktop login. It

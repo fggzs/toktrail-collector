@@ -9,8 +9,8 @@ import (
 
 func TestListsCompiledInSources(t *testing.T) {
 	adapters := All()
-	if len(adapters) != 13 {
-		t.Fatalf("expected 13 compiled-in adapters, got %d", len(adapters))
+	if len(adapters) != 15 {
+		t.Fatalf("expected 15 compiled-in adapters, got %d", len(adapters))
 	}
 	var sources []string
 	for _, entry := range adapters {
@@ -22,7 +22,7 @@ func TestListsCompiledInSources(t *testing.T) {
 		}
 		sources = append(sources, entry.Source)
 	}
-	expected := []string{adapter.UsageJSONSource, adapter.CodexJSONLSource, adapter.ClaudeCodeJSONLSource, adapter.DeepSeekHarnessSource, adapter.WorkBuddyJSONLSource, adapter.QwenJSONLSource, adapter.KimiCLIJSONLSource, adapter.KimiCodeJSONLSource, adapter.ZCodeSQLiteSource, adapter.HermesSQLiteSource, adapter.OpenClawSQLiteSource, adapter.PiJSONLSource, adapter.OMPJSONLSource}
+	expected := []string{adapter.UsageJSONSource, adapter.CodexJSONLSource, adapter.ClaudeCodeJSONLSource, adapter.DeepSeekHarnessSource, adapter.WorkBuddyJSONLSource, adapter.QwenJSONLSource, adapter.KimiCLIJSONLSource, adapter.KimiCodeJSONLSource, adapter.ZCodeSQLiteSource, adapter.HermesSQLiteSource, adapter.OpenClawSQLiteSource, adapter.PiJSONLSource, adapter.OMPJSONLSource, adapter.CodeBuddyHistorySource, adapter.OpenCodeSQLiteSource}
 	if !reflect.DeepEqual(sources, expected) {
 		t.Fatalf("unexpected adapter order: got %#v want %#v", sources, expected)
 	}
