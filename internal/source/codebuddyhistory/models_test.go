@@ -220,7 +220,7 @@ func TestLoadRecordsIgnoresForeignModelAttribution(t *testing.T) {
 	conversationFixture(t, root, "e006e7ae", "eedd4e0a", `{
 	  "messages": [{"id":"m1","type":"text","role":"user","isComplete":true},{"id":"m2","type":"text","role":"assistant","isComplete":false}],
 	  "requests": [{"id":"r1","type":"craft","messages":["m1","m2"],"state":"complete","startedAt":1791014053528,
-	    "usage":{"inputTokens":1000,"outputTokens":10,"totalTokens":1010,"cacheTokens":400,"cachedMissTokens":600}}]
+	    "usage":{"inputTokens":1000,"outputTokens":10,"totalTokens":1010,"cacheTokens":400,"cachedWriteTokens":0,"cachedMissTokens":600}}]
 	}`)
 	indexPath := filepath.Join(root, "e006e7ae", "eedd4e0a", indexFileName)
 	// The file claims another request, so its model must not be borrowed.
@@ -257,21 +257,26 @@ func TestLoadRecordsSkipsEmptyUsageRows(t *testing.T) {
 	}
 }
 
-func TestLoadRecordsFallsBackToMessageModTime(t *testing.T) {
+// TestLoadRecordsQuarantinesRequestsWithoutTimestamp pins the removal of the
+// message-file mtime fallback: a modification time is a transport artifact
+// (backup restores and copies rewrite it), so a turn that records no valid
+// startedAt is isolated instead of dated by guesswork.
+func TestLoadRecordsQuarantinesRequestsWithoutTimestamp(t *testing.T) {
 	root := t.TempDir()
-	// No startedAt: older clients record none, so the turn time comes from
-	// the modification time of the turn's first message file.
 	indexPath := conversationFixture(t, root, "e006e7ae", "eedd4e0a", `{
 	  "messages": [{"id":"m1","type":"text","role":"user","isComplete":true},{"id":"m2","type":"text","role":"assistant","isComplete":true}],
-	  "requests": [{"id":"r1","type":"craft","messages":["m1","m2"],"state":"complete",
-	    "usage":{"inputTokens":87760,"outputTokens":783,"totalTokens":88543,"lastTokens":19747}}]
+	  "requests": [
+	    {"id":"r1","type":"craft","messages":["m1","m2"],"state":"complete",
+	     "usage":{"inputTokens":87760,"outputTokens":783,"totalTokens":88543,"cacheTokens":0,"cachedWriteTokens":0,"cachedMissTokens":0}},
+	    {"id":"r2","type":"craft","messages":["m2"],"state":"complete","startedAt":-1,
+	     "usage":{"inputTokens":100,"outputTokens":10,"totalTokens":110,"cacheTokens":0,"cachedWriteTokens":0,"cachedMissTokens":100}}
+	  ]
 	}`)
 	messageFixture(t, indexPath, "m1", "user", "")
 	messageFixture(t, indexPath, "m2", "assistant", extraFixture(t, "r1", "hy3"))
 	start := time.Date(2026, 2, 8, 11, 47, 30, 0, time.UTC)
-	stamps := map[string]time.Time{"m1": start, "m2": start.Add(3 * time.Minute)}
-	for id, stamp := range stamps {
-		if err := os.Chtimes(filepath.Join(filepath.Dir(indexPath), messagesDirName, id+".json"), stamp, stamp); err != nil {
+	for _, id := range []string{"m1", "m2"} {
+		if err := os.Chtimes(filepath.Join(filepath.Dir(indexPath), messagesDirName, id+".json"), start, start); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -280,17 +285,11 @@ func TestLoadRecordsFallsBackToMessageModTime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	if len(result.Records) != 1 {
-		t.Fatalf("expected 1 record, got %d", len(result.Records))
+	if len(result.Records) != 0 {
+		t.Fatalf("no record may be dated from a file mtime: %#v", result.Records)
 	}
-	if got := adapter.StringField(result.Records[0], "occurredAt"); got != "2026-02-08T11:47:30Z" {
-		t.Fatalf("occurredAt = %q want the first message file mtime", got)
-	}
-	if got := adapter.StringField(result.Records[0], "model"); got != "hy3" {
-		t.Fatalf("model = %q want hy3", got)
-	}
-	if got := adapter.StringField(result.Records[0], "input"); got != "87760" {
-		t.Fatalf("input = %q", got)
+	if result.Quarantined != 2 {
+		t.Fatalf("expected both undated requests quarantined, got %d", result.Quarantined)
 	}
 }
 
@@ -309,7 +308,7 @@ func TestLoadRecordsQuarantinesContradictoryUsage(t *testing.T) {
 		},
 		{
 			name:  "total disagrees with prompt plus output",
-			index: `{"requests":[{"id":"r1","state":"complete","startedAt":1791014053528,"usage":{"inputTokens":100,"outputTokens":10,"totalTokens":999}}]}`,
+			index: `{"requests":[{"id":"r1","state":"complete","startedAt":1791014053528,"usage":{"inputTokens":100,"outputTokens":10,"totalTokens":999,"cacheTokens":0,"cachedWriteTokens":0}}]}`,
 		},
 		{
 			name:  "negative counter",
@@ -324,16 +323,24 @@ func TestLoadRecordsQuarantinesContradictoryUsage(t *testing.T) {
 			index: `{"requests":[{"id":"r1","state":"complete","startedAt":1791014053528,"usage":{"inputTokens":100,"cacheTokens":0}}]}`,
 		},
 		{
+			name:  "missing cache split",
+			index: `{"requests":[{"id":"r1","state":"complete","startedAt":1791014053528,"usage":{"inputTokens":100,"outputTokens":10,"totalTokens":110}}]}`,
+		},
+		{
+			name:  "missing cache write counter",
+			index: `{"requests":[{"id":"r1","state":"complete","startedAt":1791014053528,"usage":{"inputTokens":100,"outputTokens":10,"totalTokens":110,"cacheTokens":0}}]}`,
+		},
+		{
 			name:  "missing timestamp",
-			index: `{"requests":[{"id":"r1","state":"complete","usage":{"inputTokens":100,"outputTokens":10,"totalTokens":110}}]}`,
+			index: `{"requests":[{"id":"r1","state":"complete","usage":{"inputTokens":100,"outputTokens":10,"totalTokens":110,"cacheTokens":0,"cachedWriteTokens":0}}]}`,
 		},
 		{
 			name:  "zero timestamp",
-			index: `{"requests":[{"id":"r1","state":"complete","startedAt":0,"usage":{"inputTokens":100,"outputTokens":10,"totalTokens":110}}]}`,
+			index: `{"requests":[{"id":"r1","state":"complete","startedAt":0,"usage":{"inputTokens":100,"outputTokens":10,"totalTokens":110,"cacheTokens":0,"cachedWriteTokens":0}}]}`,
 		},
 		{
 			name:  "invalid model identifier",
-			index: `{"requests":[{"id":"r1","messages":["m1"],"state":"complete","startedAt":1791014053528,"usage":{"inputTokens":100,"outputTokens":10,"totalTokens":110}}]}`,
+			index: `{"requests":[{"id":"r1","messages":["m1"],"state":"complete","startedAt":1791014053528,"usage":{"inputTokens":100,"outputTokens":10,"totalTokens":110,"cacheTokens":0,"cachedWriteTokens":0}}]}`,
 		},
 		{
 			name:  "invalid conversation index JSON",
@@ -519,6 +526,246 @@ func TestFilterForExportKeepsLegacyV1RecordsDeduplicated(t *testing.T) {
 		if adapter.StringField(entry, "recordKey") == key {
 			t.Fatalf("legacy v1 record must stay deduplicated")
 		}
+	}
+}
+
+// seedKnown stores one record as already exported history.
+func seedKnown(t *testing.T, stateDir string, record adapter.Record) {
+	t.Helper()
+	raw, err := json.Marshal(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := quarantine.New(stateDir).Append([]quarantine.Entry{{
+		Source:    adapter.CodeBuddyHistorySource,
+		RecordKey: adapter.StringField(record, "recordKey"),
+		Record:    raw,
+		Reason:    "test",
+	}}); err != nil {
+		t.Fatalf("seed quarantine: %v", err)
+	}
+}
+
+// TestFilterForExportDeduplicatesModelMetadataUpdates pins the v2 migration:
+// a record exported while the model was still unknown, and a record exported
+// with a resolved model that a later rescan can no longer resolve, both keep
+// the first stored configuration instead of failing the immutable guard.
+func TestFilterForExportDeduplicatesModelMetadataUpdates(t *testing.T) {
+	root := t.TempDir()
+	conversationFixture(t, root, "p1", "c1", realIndex)
+	indexPath := filepath.Join(root, "p1", "c1", indexFileName)
+	messageFixture(t, indexPath, "m2", "assistant", extraFixture(t, "r1", "hy4-preview-ioa"))
+
+	result, err := LoadRecords(root)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	record := result.Records[0]
+	if adapter.StringField(record, "model") != "hy4-preview-ioa" {
+		t.Fatalf("fixture must resolve a model, got %q", adapter.StringField(record, "model"))
+	}
+	unresolved := adapter.Record{}
+	for field, value := range record {
+		unresolved[field] = value
+	}
+	unresolved["model"] = codebuddyUnknownModel
+
+	// unknown stored, resolved on rescan.
+	stateDir := t.TempDir()
+	seedKnown(t, stateDir, unresolved)
+	fresh, err := filterKnownRecordsContext(context.Background(), stateDir, []adapter.Record{record})
+	if err != nil {
+		t.Fatalf("unknown -> resolved model must stay deduplicated: %v", err)
+	}
+	if len(fresh) != 0 {
+		t.Fatalf("expected the already exported record to be filtered, got %d", len(fresh))
+	}
+
+	// resolved stored, unknown on rescan.
+	otherState := t.TempDir()
+	seedKnown(t, otherState, record)
+	fresh, err = filterKnownRecordsContext(context.Background(), otherState, []adapter.Record{unresolved})
+	if err != nil {
+		t.Fatalf("resolved -> unknown model must stay deduplicated: %v", err)
+	}
+	if len(fresh) != 0 {
+		t.Fatalf("expected the already exported record to be filtered, got %d", len(fresh))
+	}
+
+	// Counters still cannot be replayed over verified history.
+	drifted := adapter.Record{}
+	for field, value := range unresolved {
+		drifted[field] = value
+	}
+	drifted["output"] = "9999"
+	if _, err := filterKnownRecordsContext(context.Background(), otherState, []adapter.Record{drifted}); err == nil {
+		t.Fatal("a counter change must still fail the immutable-history guard")
+	}
+
+	// A genuinely new request still exports.
+	added := adapter.Record{}
+	for field, value := range record {
+		added[field] = value
+	}
+	added["recordKey"] = "codebuddy-history:new-request"
+	fresh, err = filterKnownRecordsContext(context.Background(), otherState, []adapter.Record{added})
+	if err != nil {
+		t.Fatalf("new request must export: %v", err)
+	}
+	if len(fresh) != 1 || adapter.StringField(fresh[0], "recordKey") != "codebuddy-history:new-request" {
+		t.Fatalf("new request was not exported: %#v", fresh)
+	}
+}
+
+// TestLoadRecordsSingleFileGrantDoesNotReadSiblings pins the grant boundary:
+// naming one index.json file authorizes that file alone, so the sibling message
+// files that would resolve a model are never read.
+func TestLoadRecordsSingleFileGrantDoesNotReadSiblings(t *testing.T) {
+	root := t.TempDir()
+	indexPath := conversationFixture(t, root, "p1", "c1", realIndex)
+	messageFixture(t, indexPath, "m2", "assistant", extraFixture(t, "r1", "hy4-preview-ioa"))
+
+	result, err := LoadRecords(indexPath)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(result.Records) != 2 {
+		t.Fatalf("expected 2 records, got %d", len(result.Records))
+	}
+	for _, record := range result.Records {
+		if got := adapter.StringField(record, "model"); got != codebuddyUnknownModel {
+			t.Fatalf("single-file grant read a sibling message file: model = %q", got)
+		}
+	}
+
+	// The same tree scanned through a directory grant still resolves it.
+	result, err = LoadRecords(root)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got := adapter.StringField(result.Records[0], "model"); got != "hy4-preview-ioa" {
+		t.Fatalf("directory grant must resolve the model, got %q", got)
+	}
+}
+
+// TestLoadRecordsRejectsMessageLinksOutsideGrant pins the containment check:
+// a message file reached through a link that leaves the granted tree is not
+// read, and the request falls back to an unknown model.
+func TestLoadRecordsRejectsMessageLinksOutsideGrant(t *testing.T) {
+	root := t.TempDir()
+	indexPath := conversationFixture(t, root, "p1", "c1", `{
+	  "messages": [{"id":"m1","type":"text","role":"user","isComplete":true},{"id":"m2","type":"text","role":"assistant","isComplete":false}],
+	  "requests": [{"id":"r1","type":"craft","messages":["m1","m2"],"state":"complete","startedAt":1791014053528,
+	    "usage":{"inputTokens":1000,"outputTokens":10,"totalTokens":1010,"cacheTokens":400,"cachedWriteTokens":0,"cachedMissTokens":600}}]
+	}`)
+
+	// A message body outside the granted tree, reachable only through a link.
+	outside := filepath.Join(t.TempDir(), "m2.json")
+	body, err := json.Marshal(map[string]any{
+		"role":    "assistant",
+		"message": `{"role":"assistant"}`,
+		"id":      "m2",
+		"extra":   extraFixture(t, "r1", "hy4-preview-ioa"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(outside, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(filepath.Dir(indexPath), messagesDirName, "m2.json")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("symlinks are unavailable on this host: %v", err)
+	}
+
+	result, err := LoadRecords(root)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(result.Records) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(result.Records))
+	}
+	if got := adapter.StringField(result.Records[0], "model"); got != codebuddyUnknownModel {
+		t.Fatalf("message file outside the grant was read: model = %q", got)
+	}
+}
+
+// TestLoadRecordsMultiModelRequestReportsUnknown pins the attribution rule: a
+// turn whose attributable assistant messages name different models cannot be
+// split across them, so the whole turn reports an unknown model.
+func TestLoadRecordsMultiModelRequestReportsUnknown(t *testing.T) {
+	root := t.TempDir()
+	indexPath := conversationFixture(t, root, "p1", "c1", `{
+	  "messages": [{"id":"m1","type":"text","role":"user","isComplete":true},{"id":"m2","type":"text","role":"assistant","isComplete":false},{"id":"m3","type":"text","role":"assistant","isComplete":false}],
+	  "requests": [{"id":"r1","type":"craft","messages":["m1","m2","m3"],"state":"complete","startedAt":1791014053528,
+	    "usage":{"inputTokens":1000,"outputTokens":10,"totalTokens":1010,"cacheTokens":400,"cachedWriteTokens":0,"cachedMissTokens":600}}]
+	}`)
+	messageFixture(t, indexPath, "m2", "assistant", extraFixture(t, "r1", "model-a"))
+	messageFixture(t, indexPath, "m3", "assistant", extraFixture(t, "r1", "model-b"))
+
+	result, err := LoadRecords(root)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(result.Records) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(result.Records))
+	}
+	if got := adapter.StringField(result.Records[0], "model"); got != codebuddyUnknownModel {
+		t.Fatalf("mixed models must not be attributed: model = %q", got)
+	}
+	if result.Quarantined != 0 {
+		t.Fatalf("an unattributable model must not quarantine the usage: %d", result.Quarantined)
+	}
+}
+
+// TestLoadRecordsRequiresConsistentModelAcrossTurn pins the complementary rule:
+// one model repeated by every attributable assistant message is attributed.
+func TestLoadRecordsRequiresConsistentModelAcrossTurn(t *testing.T) {
+	root := t.TempDir()
+	indexPath := conversationFixture(t, root, "p1", "c1", `{
+	  "messages": [{"id":"m1","type":"text","role":"user","isComplete":true},{"id":"m2","type":"text","role":"assistant","isComplete":false},{"id":"m3","type":"text","role":"assistant","isComplete":false}],
+	  "requests": [{"id":"r1","type":"craft","messages":["m1","m2","m3"],"state":"complete","startedAt":1791014053528,
+	    "usage":{"inputTokens":1000,"outputTokens":10,"totalTokens":1010,"cacheTokens":400,"cachedWriteTokens":0,"cachedMissTokens":600}}]
+	}`)
+	messageFixture(t, indexPath, "m2", "assistant", extraFixture(t, "r1", "model-a"))
+	messageFixture(t, indexPath, "m3", "assistant", extraFixture(t, "r1", "model-a"))
+
+	result, err := LoadRecords(root)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got := adapter.StringField(result.Records[0], "model"); got != "model-a" {
+		t.Fatalf("consistent models must be attributed, got %q", got)
+	}
+}
+
+// TestLoadRecordsIgnoresMessagesWithoutRequestID pins the strict attribution
+// rule: a message that does not name the request is not attributable, so its
+// model cannot be borrowed by the turn.
+func TestLoadRecordsIgnoresMessagesWithoutRequestID(t *testing.T) {
+	root := t.TempDir()
+	indexPath := conversationFixture(t, root, "p1", "c1", `{
+	  "messages": [{"id":"m1","type":"text","role":"user","isComplete":true},{"id":"m2","type":"text","role":"assistant","isComplete":false}],
+	  "requests": [{"id":"r1","type":"craft","messages":["m1","m2"],"state":"complete","startedAt":1791014053528,
+	    "usage":{"inputTokens":1000,"outputTokens":10,"totalTokens":1010,"cacheTokens":400,"cachedWriteTokens":0,"cachedMissTokens":600}}]
+	}`)
+	body, err := json.Marshal(map[string]any{
+		"role":    "assistant",
+		"message": `{"role":"assistant"}`,
+		"id":      "m2",
+		"extra":   `{"modelId":"model-a"}`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFixture(t, filepath.Join(filepath.Dir(indexPath), messagesDirName, "m2.json"), string(body))
+
+	result, err := LoadRecords(root)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got := adapter.StringField(result.Records[0], "model"); got != codebuddyUnknownModel {
+		t.Fatalf("a message without requestId must not be attributed, model = %q", got)
 	}
 }
 
