@@ -1,22 +1,14 @@
 // Package codebuddyhistory collects token usage from local CodeBuddy IDE
 // (CodeBuddy CN) session history. CodeBuddy stores one index.json per
-// conversation under the extension data directory, in the same relative layout
-// on every platform:
+// conversation under
 //
-//	<data>/<userId>/CodeBuddyIDE/<userId>/history/<workspace>/<conversation>/index.json
+//	~/AppData/Local/CodeBuddyExtension/Data/<userId>/CodeBuddyIDE/<userId>/history/<workspace>/<conversation>/index.json
 //
-// where <data> is the XDG data directory on POSIX hosts
-// ($XDG_DATA_HOME/CodeBuddyExtension/Data, default
-// ~/.local/share/CodeBuddyExtension/Data) and
-// ~/AppData/Local/CodeBuddyExtension/Data on Windows. The loader takes whatever
-// ancestor the grant names, so it is layout-agnostic; the registry decides
-// which layout is probed for the managed default directory.
-//
-// whose `requests[]` entries carry per-request usage counters. The adapter
-// is passive: it only reads index.json files (plus the small per-message
-// files needed for model attribution and turn timestamps) and never writes
-// to the CodeBuddy directory. Conversation bodies are never interpreted,
-// retained, or exported.
+// whose requests[] entries carry per-request usage counters. The adapter is
+// passive: it reads index.json files and, only when the grant covers a
+// directory, the small per-message files needed for model attribution. It
+// never writes to the CodeBuddy directory, and conversation bodies are never
+// interpreted, retained, or exported.
 //
 // Counter semantics, verified against recorded indexes:
 //
@@ -28,16 +20,21 @@
 //
 //   - inputTokens is the total prompt size of the turn, cached and uncached
 //     prompt bytes alike.
-//   - cacheTokens is the cached (cache-read) share and cachedMissTokens the
-//     uncached share. The client writes 0 for cachedMissTokens on turns whose
-//     usage was not broken down (the first turn of a conversation records
-//     inputTokens=98927 with cacheTokens=0 / cachedMissTokens=0), so a ZERO
-//     cachedMissTokens is read as "not reported", never as "the whole prompt
-//     is uncached".
+//   - cacheTokens is the recorded cached (cache-read) share and
+//     cachedMissTokens the recorded uncached share. The client writes 0 for
+//     cachedMissTokens on turns whose usage was not broken down (the first
+//     turn of a conversation records inputTokens=98927 with cacheTokens=0 /
+//     cachedMissTokens=0), so a ZERO cachedMissTokens is read as "not
+//     reported", never as "the whole prompt is uncached"; the uncached share
+//     then follows from inputTokens minus the recorded cacheTokens.
 //   - cachedWriteTokens is carried as the cache-write share and is never
 //     subtracted from the prompt: recorded turns report it beside the split
 //     rather than inside it.
 //   - totalTokens is inputTokens + outputTokens when present.
+//   - A row that records the prompt but omits cacheTokens or
+//     cachedWriteTokens only proves the total prompt: it does not prove those
+//     shares were zero, so the request is quarantined instead of exported
+//     with an invented split.
 //
 // The record uploads the uncached prompt as "input", the cached share as
 // "cacheRead" and the cache-write share as "cacheWrite" (the same
@@ -49,33 +46,34 @@
 // delta: repeated turns record their own consumption, so the loader emits
 // kind="delta".
 //
-// Timestamps: recent indexes record startedAt in epoch milliseconds. Older
-// conversations record none and no message file carries a createdAt either,
-// so the loader falls back to the modification time of the turn's first
-// message file — the client writes that file when the turn starts, and the
-// sampled indexes match the recorded startedAt to the second. A turn with
-// neither is quarantined rather than uploaded with an invented time.
+// Timestamps: startedAt (epoch milliseconds, seconds tolerated) is the only
+// accepted clock value. Older conversations record none, their message files
+// carry no createdAt, and a file modification time is a transport artifact
+// (backup restores and plain copies rewrite it), so a request without a valid
+// startedAt is quarantined rather than uploaded with a derived time.
 //
 // Usage rows whose counters are all null ({inputTokens:null,...}) are old
 // placeholders for turns that never recorded counts: they account for nothing
 // and are skipped, not quarantined.
 //
-// The model identifier is not recorded in index.json. It lives in the
-// per-message files as extra.modelId (extra is itself a JSON string), so the
-// loader resolves one recorded model per request by reading the first
-// attributable assistant message that belongs to that request. Turns that never
-// store a separate assistant message record the model on their single user
-// message instead; that message is used as a fallback, and only when its own
-// extra.requestId proves it belongs to this request. Message files are bounded
-// and probing is capped; when nothing is attributable the record reports
-// "unknown" and a value-free local issue, never a guess.
+// Model attribution: the model identifier is not recorded in index.json. It
+// lives in the per-message files as extra.modelId (extra is itself a JSON
+// string). A request is attributed only when every attributable assistant
+// message of the turn records the same model and names that request in
+// extra.requestId; a turn that keeps its model on the single user message is
+// accepted only when that message's own extra.requestId proves it belongs to
+// this request. A mixed, unnamed or unparsable set reports "unknown" with a
+// value-free local issue and still exports its counters. Probing stays inside
+// the granted directory: a single-file grant never reads the sibling message
+// files.
 //
 // Record identity is unchanged from codebuddy-history-v1: recordKey and
 // groupKey keep hashing "<conversation>/<request>" so records exported by
 // earlier builds keep deduplicating. codebuddy-history-v2 only enriches the
-// record with a resolved model; a stored v1 record whose counters match is
-// treated as already exported instead of failing the immutable-history
-// guard.
+// record with a resolved model; a stored record whose only difference is the
+// model metadata (unknown on one side, a recorded model on the other) stays
+// deduplicated instead of failing the immutable-history guard, while counter,
+// identity and timestamp changes still fail it.
 //
 // The scan is stateless: every Load re-emits the full history with stable keys
 // and FilterForExport drops what the outbox or quarantine already hold.
@@ -192,7 +190,7 @@ func loadRecordsContext(ctx context.Context, root string) (adapter.LoadResult, e
 	if clean == "" {
 		return result, errors.New("missing input path")
 	}
-	files, err := discoverSessionIndexes(ctx, clean)
+	scope, err := discoverSessionIndexes(ctx, clean)
 	if err != nil {
 		return adapter.LoadResult{}, err
 	}
@@ -205,7 +203,7 @@ func loadRecordsContext(ctx context.Context, root string) (adapter.LoadResult, e
 			result.Issues = append(result.Issues, adapter.LineIssue{File: "file:" + adapter.ShortHash(file), Line: 0, Reason: reason})
 		}
 	}
-	for _, file := range files {
+	for _, file := range scope.files {
 		if err := ctx.Err(); err != nil {
 			return adapter.LoadResult{}, err
 		}
@@ -215,7 +213,13 @@ func loadRecordsContext(ctx context.Context, root string) (adapter.LoadResult, e
 			continue
 		}
 		conversationID := filepath.Base(filepath.Dir(file))
-		models := &modelLookup{dir: filepath.Dir(file), messages: map[string]modelInfo{}, modTimes: map[string]time.Time{}}
+		// Metadata probing needs a directory grant: naming one index.json
+		// file authorizes that file alone, so sibling message files stay
+		// unread and every request reports an unknown model.
+		var models *modelLookup
+		if scope.dir != "" && scope.rootResolved != "" {
+			models = &modelLookup{root: scope.dir, rootResolved: scope.rootResolved, dir: filepath.Dir(file), messages: map[string]modelInfo{}}
+		}
 		for _, req := range idx.Requests {
 			if err := ctx.Err(); err != nil {
 				return adapter.LoadResult{}, err
@@ -276,27 +280,47 @@ func loadRecordsContext(ctx context.Context, root string) (adapter.LoadResult, e
 	return result, nil
 }
 
+// scanScope is what one granted input authorizes the loader to read.
+type scanScope struct {
+	// dir is the granted directory, empty when the grant names a single
+	// index.json file. Message probing requires it.
+	dir string
+	// rootResolved is the granted directory with links resolved, so a
+	// message reached through a linked directory outside the grant is
+	// rejected instead of read. Empty when the grant is a single file or
+	// the directory cannot be resolved.
+	rootResolved string
+	// files are the conversation indexes proven below dir (or the single
+	// granted file).
+	files []string
+}
+
 // discoverSessionIndexes returns every index.json that is proven to be a
 // conversation index: either it sits at <any ancestor>/history/<workspace>/
 // <conversation>/index.json (the recorded layout), or its directory carries
 // the messages directory every conversation writes. A workspace-level
 // conversation list satisfies neither proof and is never decoded. Hidden
 // directories are skipped. A root that names a single index.json file is
-// accepted directly. A missing root returns an error, matching the shared
-// jsonl discovery behavior.
-func discoverSessionIndexes(ctx context.Context, root string) ([]string, error) {
+// accepted directly, with no directory scope. A missing root returns an error,
+// matching the shared jsonl discovery behavior.
+func discoverSessionIndexes(ctx context.Context, root string) (scanScope, error) {
+	scope := scanScope{}
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return scope, err
 	}
 	info, err := os.Stat(root)
 	if err != nil {
-		return nil, err
+		return scope, err
 	}
 	if !info.IsDir() {
 		if filepath.Base(root) != indexFileName {
-			return nil, fmt.Errorf("codebuddy-history input must be a directory or an index.json file")
+			return scope, fmt.Errorf("codebuddy-history input must be a directory or an index.json file")
 		}
-		return []string{root}, nil
+		return scanScope{files: []string{root}}, nil
+	}
+	scope.dir = root
+	if resolved, err := filepath.EvalSymlinks(root); err == nil {
+		scope.rootResolved = resolved
 	}
 	var files []string
 	err = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
@@ -322,10 +346,11 @@ func discoverSessionIndexes(ctx context.Context, root string) ([]string, error) 
 		return nil
 	})
 	if err != nil {
-		return nil, err
+		return scope, err
 	}
 	sort.Strings(files)
-	return files, nil
+	scope.files = files
+	return scope, nil
 }
 
 // conversationIndexPath reports whether path is structurally a conversation
@@ -399,6 +424,11 @@ func parseRequest(req indexRequest, conversationID string, models *modelLookup) 
 		// recorded. Nothing was consumed, so nothing is quarantined.
 		return nil, "", ""
 	}
+	if zeroUsage(req.Usage) {
+		// The client writes all-zero rows for turns that recorded no
+		// consumption; there is no split to reason about.
+		return nil, "", ""
+	}
 	counts, reason := normalizeUsage(req.Usage)
 	if reason != "" {
 		return nil, reason, ""
@@ -408,14 +438,12 @@ func parseRequest(req indexRequest, conversationID string, models *modelLookup) 
 	}
 	occurred, ok := requestTime(req.StartedAt)
 	if !ok {
-		// Conversations written by older clients record no per-turn
-		// timestamp; the client writes the turn's first message file when
-		// the turn starts, so its modification time is the recorded clock
-		// value (verified against startedAt on sampled indexes).
-		occurred, ok = models.turnTime(req)
-	}
-	if !ok {
-		return nil, "completed request without startedAt", ""
+		// startedAt is the only recorded clock value. A message file
+		// modification time is a transport artifact (restores and copies
+		// rewrite it) and would also make an unchanged request look
+		// different after export, so a turn without a valid startedAt is
+		// isolated instead of dated by guesswork.
+		return nil, "completed request without valid startedAt", ""
 	}
 	model, reason, diag := models.attribute(req)
 	if reason != "" {
@@ -461,13 +489,19 @@ func normalizeUsage(u *requestUsage) (usageCounts, string) {
 		return counts, "completed request without complete token counters"
 	}
 	counts.output = output
-	cacheRead, _, ok := countValue(u.CacheTokens)
+	cacheRead, cachePresent, ok := countValue(u.CacheTokens)
 	if !ok {
 		return counts, "invalid cacheTokens"
 	}
-	cacheWrite, _, ok := countValue(u.CachedWriteTokens)
+	cacheWrite, writePresent, ok := countValue(u.CachedWriteTokens)
 	if !ok {
 		return counts, "invalid cachedWriteTokens"
+	}
+	if !cachePresent || !writePresent {
+		// A row that records the prompt but omits the split only proves
+		// totalTokens worth of prompt: exporting cacheRead=0/cacheWrite=0
+		// would invent a breakdown nobody recorded.
+		return counts, "completed request without a recorded cache split"
 	}
 	cacheMiss, missPresent, ok := countValue(u.CachedMissTokens)
 	if !ok {
@@ -495,6 +529,27 @@ func normalizeUsage(u *requestUsage) (usageCounts, string) {
 	counts.cacheRead = cacheRead
 	counts.cacheWrite = cacheWrite
 	return counts, ""
+}
+
+// zeroUsage reports whether every recorded counter is zero. Such a row records
+// no consumption, so it needs no cache split and accounts for nothing.
+func zeroUsage(u *requestUsage) bool {
+	fields := []*json.Number{u.InputTokens, u.OutputTokens, u.TotalTokens, u.CacheTokens, u.CachedWriteTokens, u.CachedMissTokens}
+	recorded := false
+	for _, field := range fields {
+		if field == nil {
+			continue
+		}
+		value, present, ok := countValue(field)
+		if !present {
+			continue
+		}
+		if !ok || value != 0 {
+			return false
+		}
+		recorded = true
+	}
+	return recorded
 }
 
 // countValue reads one counter as a non-negative decimal integer. present is
@@ -528,15 +583,15 @@ func requestTime(n *json.Number) (time.Time, bool) {
 	return time.UnixMilli(value).UTC(), true
 }
 
-// modelLookup resolves a request's recorded model and turn timestamp from the
-// message files of the conversation. Files are probed lazily and memoized, so
-// one conversation reads at most one small file per request it can attribute.
+// modelLookup resolves a request's recorded model from the message files of
+// one conversation. Files are probed lazily and memoized, so a conversation
+// reads each attributable message file at most once. Probes never leave the
+// granted directory: root is the authorized root, dir the conversation.
 type modelLookup struct {
-	dir      string
-	messages map[string]modelInfo
-	// modTimes memoizes message file modification times; a zero value means
-	// the file is absent and must not be probed again.
-	modTimes map[string]time.Time
+	root         string
+	rootResolved string
+	dir          string
+	messages     map[string]modelInfo
 }
 
 // modelInfo is the collector's view of one message file.
@@ -556,15 +611,17 @@ type modelInfo struct {
 
 // attribute returns the model recorded for the request. A non-empty reason
 // quarantines the request (a present but illegal model identifier); an empty
-// model with a diagnostic means "unknown" (the usage still exports).
+// model with a diagnostic means "unknown" (the usage still exports). Only a
+// turn whose attributable assistant messages all name the same recorded model
+// is attributed: a turn that mixed models, lost its request attribution, or
+// lists more messages than can be inspected reports unknown, because splitting
+// one turn's counters across models would be a guess.
 //
-// The assistant message is the primary source. Some turns never store a
-// separate assistant message: the request carries exactly one user message
-// whose extra already names the model (verified against recorded data, where a
-// single-message request records modelId/modelName/requestId on the user
-// message). Those turns were reported as "unknown" although the client had
-// recorded the model. Such a message is accepted ONLY when its recorded
-// requestId equals this request's id — the user message never grants
+// Some turns never store a separate assistant message: the client records the
+// model on their single user message instead (verified against recorded data,
+// where a one-message request carries modelId/modelName/requestId on the user
+// message). That message is a fallback source, accepted ONLY when its own
+// extra.requestId equals this request's id; a user message never grants
 // attribution by proximity, because borrowing a neighbouring turn's model is
 // worse than reporting "unknown".
 func (l *modelLookup) attribute(req indexRequest) (string, string, string) {
@@ -572,88 +629,107 @@ func (l *modelLookup) attribute(req indexRequest) (string, string, string) {
 		return codebuddyUnknownModel, "", "request model not recorded; model reported unknown"
 	}
 	requestID := strings.TrimSpace(req.ID)
-	fallbackModel := ""
-	probes := 0
-	for _, id := range req.Messages {
-		if probes >= maxModelProbes {
-			break
-		}
-		id = strings.TrimSpace(id)
+	candidates := make([]string, 0, len(req.Messages))
+	for _, raw := range req.Messages {
+		id := strings.TrimSpace(raw)
 		// A message id is a file name, so it must never carry a path.
 		if id == "" || strings.ContainsAny(id, `/\`) || strings.Contains(id, "..") {
 			continue
 		}
-		probes++
+		candidates = append(candidates, id)
+	}
+	if len(candidates) == 0 {
+		return codebuddyUnknownModel, "", "request model not recorded; model reported unknown"
+	}
+	if len(candidates) > maxModelProbes {
+		return codebuddyUnknownModel, "", "request lists more messages than can be inspected; model reported unknown"
+	}
+	resolved := ""
+	fallback := ""
+	for _, id := range candidates {
 		info := l.message(id)
 		if !info.parsed {
 			continue
 		}
-		if info.request != "" && info.request != requestID {
-			// The file says it belongs to another request: never borrow
-			// another turn's model.
+		if !strings.EqualFold(info.role, "assistant") {
+			// A non-assistant message never grants attribution by
+			// proximity: it must prove it belongs to this request.
+			if info.request == requestID && !info.invalid && info.model != "" && fallback == "" {
+				fallback = info.model
+			}
 			continue
 		}
-		if strings.EqualFold(info.role, "assistant") {
-			if info.invalid {
-				return "", "invalid request model identifier", ""
-			}
-			if info.model == "" {
-				continue
-			}
-			return info.model, "", ""
+		if info.request != requestID {
+			// The file names another request (or none at all): never
+			// borrow its model for this turn.
+			continue
 		}
-		if info.request == requestID && !info.invalid && info.model != "" && fallbackModel == "" {
-			// A non-assistant message that PROVES it belongs to this request.
-			fallbackModel = info.model
+		if info.invalid {
+			return "", "invalid request model identifier", ""
 		}
+		if info.model == "" {
+			continue
+		}
+		if resolved != "" && resolved != info.model {
+			return codebuddyUnknownModel, "", "request recorded more than one model; model reported unknown"
+		}
+		resolved = info.model
 	}
-	if fallbackModel != "" {
-		return fallbackModel, "", ""
+	if resolved != "" {
+		return resolved, "", ""
+	}
+	if fallback != "" {
+		return fallback, "", ""
 	}
 	return codebuddyUnknownModel, "", "request model not recorded; model reported unknown"
 }
 
-// turnTime returns the modification time of the turn's first message file.
-// Older clients record no per-turn timestamp but still write each message file
-// when its message is created, so this filesystem clock value is the only
-// recorded time left; it is never used when startedAt exists.
-func (l *modelLookup) turnTime(req indexRequest) (time.Time, bool) {
-	if l == nil {
-		return time.Time{}, false
+// insideRoot reports whether path stays inside root once cleaned. Both are
+// absolute-or-relative to the same base, so a sibling or parent path is
+// rejected instead of read.
+func insideRoot(root, path string) bool {
+	rel, err := filepath.Rel(root, path)
+	if err != nil || filepath.IsAbs(rel) {
+		return false
 	}
-	for _, raw := range req.Messages {
-		id := strings.TrimSpace(raw)
-		if id == "" || strings.ContainsAny(id, `/\`) || strings.Contains(id, "..") {
-			continue
-		}
-		if cached, seen := l.modTimes[id]; seen {
-			if cached.IsZero() {
-				continue
-			}
-			return cached, true
-		}
-		info, err := os.Lstat(filepath.Join(l.dir, messagesDirName, id+".json"))
-		if err != nil || !info.Mode().IsRegular() || info.ModTime().IsZero() {
-			l.modTimes[id] = time.Time{}
-			continue
-		}
-		stamp := info.ModTime().UTC()
-		l.modTimes[id] = stamp
-		return stamp, true
-	}
-	return time.Time{}, false
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
-// message returns the memoized view of one message file.
+// messagePath resolves one message file inside the granted root. The
+// conversation directory must stay below the authorized root, the path must
+// resolve below the granted directory once every link is followed (so a linked
+// messages directory pointing elsewhere cannot widen the grant), and the file
+// must be a regular file reached without a link of its own.
+func (l *modelLookup) messagePath(id string) (string, bool) {
+	if !insideRoot(l.root, l.dir) {
+		return "", false
+	}
+	candidate := filepath.Join(l.dir, messagesDirName, id+".json")
+	if !insideRoot(l.root, candidate) {
+		return "", false
+	}
+	stat, err := os.Lstat(candidate)
+	if err != nil || !stat.Mode().IsRegular() || stat.Size() > maxMessageBytes {
+		return "", false
+	}
+	resolved, err := filepath.EvalSymlinks(candidate)
+	if err != nil || !insideRoot(l.rootResolved, resolved) {
+		return "", false
+	}
+	return resolved, true
+}
+
+// message returns the memoized view of one message file. A probe outside the
+// granted root, or any unreadable or oversized file, contributes no
+// attribution.
 func (l *modelLookup) message(id string) modelInfo {
 	if cached, ok := l.messages[id]; ok {
 		return cached
 	}
 	info := modelInfo{}
 	l.messages[id] = info
-	path := filepath.Join(l.dir, messagesDirName, id+".json")
-	stat, err := os.Lstat(path)
-	if err != nil || !stat.Mode().IsRegular() || stat.Size() > maxMessageBytes {
+	path, ok := l.messagePath(id)
+	if !ok {
 		return info
 	}
 	data, err := os.ReadFile(path)
@@ -839,11 +915,11 @@ func filterKnownRecordsContext(ctx context.Context, stateDir string, records []a
 		}
 		if previous, exists := known[key]; exists {
 			if !bytes.Equal(previous, canonical) {
-				if unknownModelEquivalent(previous, record) {
-					// A stored export of the same request differs only by
-					// the model it could not resolve: the request is
-					// already in the immutable history, so it stays
-					// deduplicated.
+				if modelMetadataEquivalent(previous, record) {
+					// The same request already sits in the immutable
+					// history and differs only by model metadata: the
+					// stored copy keeps the first configuration, so
+					// the request stays deduplicated.
 					continue
 				}
 				return nil, fmt.Errorf("CodeBuddy record %s changed after export; refusing to overwrite immutable history", key)
@@ -855,28 +931,36 @@ func filterKnownRecordsContext(ctx context.Context, stateDir string, records []a
 	return fresh, nil
 }
 
-// unknownModelEquivalent reports whether a stored record describes exactly the
-// same request as fresh, apart from a model the stored export could not
-// resolve. Both versions qualify: codebuddy-history-v1 never resolved a model,
-// and codebuddy-history-v2 leaves requests whose message files are gone
-// unattributable. A build that later CAN resolve the model must not fail the
-// immutable-history guard, because the usage is identical and only the
-// attribution improved. A stored record whose model was already resolved is
-// never equivalent to a different one: that would be a rewrite, not an
-// enrichment.
-func unknownModelEquivalent(stored []byte, fresh adapter.Record) bool {
+// modelMetadataEquivalent reports whether a stored record describes exactly
+// the same request as fresh apart from model metadata: one side reports an
+// unknown model while the other carries a resolved one. The stored record may
+// come from any layout of this source (v1 never resolved a model, v2 starts
+// with unknown until message metadata resolves).
+//
+// Only the model and the layout version may differ; counters, identity and
+// the recorded time are compared byte for byte, so a usage or timestamp change
+// still fails the immutable-history guard instead of being absorbed here.
+func modelMetadataEquivalent(stored []byte, fresh adapter.Record) bool {
 	decoder := json.NewDecoder(bytes.NewReader(stored))
 	decoder.UseNumber()
 	var old adapter.Record
 	if err := decoder.Decode(&old); err != nil {
 		return false
 	}
-	switch adapter.StringField(old, "adapterVersion") {
-	case codebuddyAdapterVersion, codebuddyLegacyAdapterVersion:
-	default:
+	if !codebuddyVersion(adapter.StringField(old, "adapterVersion")) {
 		return false
 	}
-	if adapter.StringField(old, "model") != codebuddyUnknownModel {
+	if adapter.StringField(fresh, "adapterVersion") != codebuddyAdapterVersion {
+		return false
+	}
+	oldModel := adapter.StringField(old, "model")
+	freshModel := adapter.StringField(fresh, "model")
+	if oldModel == freshModel {
+		return false
+	}
+	if oldModel != codebuddyUnknownModel && freshModel != codebuddyUnknownModel {
+		// Both sides name a model and they disagree: that is a
+		// re-attribution, not missing metadata, so it stays a conflict.
 		return false
 	}
 	if len(old) != len(fresh) {
@@ -897,4 +981,9 @@ func unknownModelEquivalent(stored []byte, fresh adapter.Record) bool {
 		}
 	}
 	return true
+}
+
+// codebuddyVersion reports whether version is a layout this source produced.
+func codebuddyVersion(version string) bool {
+	return version == codebuddyLegacyAdapterVersion || version == codebuddyAdapterVersion
 }
