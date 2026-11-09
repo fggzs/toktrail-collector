@@ -477,7 +477,17 @@ func mergeManagedGrants(grantStore grants.Store, view managedconsent.View, homeD
 			continue
 		}
 		candidates := spec.DefaultInputCandidates(homeDir)
+		// def starts as the FIRST probed layout, not ResolveDefaultInput:
+		// for CodeBuddy the registry probes its POSIX/XDG directory before
+		// the Windows home-relative default, and a "not found" reason that
+		// named the Windows path sent Linux users looking at a directory
+		// that cannot exist on their host. candidates[0] equals
+		// ResolveDefaultInput for every other tool, so their reasons and
+		// grants are unchanged.
 		def := spec.ResolveDefaultInput(homeDir)
+		if len(candidates) > 0 {
+			def = candidates[0]
+		}
 		// Keep an existing grant for a known layout, including a manually
 		// disabled one. A newly created preferred directory must not bypass
 		// the user's earlier decision to disable the alternate layout.

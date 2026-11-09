@@ -2,6 +2,8 @@ package registry
 
 import (
 	"path/filepath"
+	"reflect"
+	"runtime"
 	"testing"
 )
 
@@ -237,5 +239,84 @@ func TestResolveDefaultInput(t *testing.T) {
 	}
 	if resolved := spec.ResolveDefaultInput(home); resolved != "" {
 		t.Errorf("account-network tool must have no default input, got %q", resolved)
+	}
+}
+
+// CodeBuddy keeps the same data tree in two layouts: the XDG data directory
+// POSIX hosts actually use, and the Windows AppData directory. Both must be
+// probed, XDG first, otherwise a Linux install is reported as "not detected"
+// while the usage is plainly there — the reported bug.
+func TestCodeBuddyDefaultCandidatesCoverXDGAndAppData(t *testing.T) {
+	home := filepath.Join("test", "home")
+	spec, found := LookupTool("CodeBuddy")
+	if !found {
+		t.Fatal("CodeBuddy not found")
+	}
+
+	xdgRelative := []string{"CodeBuddyExtension", "Data"}
+	homeXDG := filepath.Join(home, ".local", "share", "CodeBuddyExtension", "Data")
+	appData := filepath.Join(home, "AppData", "Local", "CodeBuddyExtension", "Data")
+
+	// An absolute base is platform-specific: filepath.IsAbs rejects the
+	// POSIX form on Windows, which is exactly why the environment value is
+	// validated instead of trusted.
+	absoluteBase := "/synthetic-xdg"
+	if runtime.GOOS == "windows" {
+		absoluteBase = `C:\synthetic-xdg`
+	}
+
+	cases := []struct {
+		name  string
+		env   string
+		first string
+	}{
+		{"unset uses the XDG home default", "", homeXDG},
+		{"absolute XDG_DATA_HOME wins", absoluteBase, filepath.Join(absoluteBase, filepath.Join(xdgRelative...))},
+		// The XDG spec makes a relative value invalid: it must be ignored
+		// instead of probing a relative path against the process cwd.
+		{"relative XDG_DATA_HOME is ignored", "relative-xdg", homeXDG},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_DATA_HOME", tc.env)
+			got := spec.DefaultInputCandidates(home)
+			want := []string{tc.first, appData}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("candidates = %#v, want %#v", got, want)
+			}
+			// ResolveDefaultInput keeps naming the Windows default; the
+			// XDG layout is a candidate, not the reported default, which is
+			// why probe order (not this value) decides detection.
+			if resolved := spec.ResolveDefaultInput(home); resolved != appData {
+				t.Fatalf("ResolveDefaultInput = %q, want %q", resolved, appData)
+			}
+		})
+	}
+}
+
+// Only a spec that declares an XDG layout may gain an environment-dependent
+// candidate: every other tool keeps exactly the home-relative paths it had.
+func TestHomeRelativeToolsHaveNoXDGCandidate(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", "/synthetic-xdg")
+	home := filepath.Join("test", "home")
+	for _, name := range []string{"Codex", "Claude Code", "WorkBuddy", "Qwen Code", "OpenCode"} {
+		spec, found := LookupTool(name)
+		if !found {
+			t.Fatalf("%s not found", name)
+		}
+		candidates := spec.DefaultInputCandidates(home)
+		if candidates[0] != spec.ResolveDefaultInput(home) {
+			t.Fatalf("%s: candidates[0] = %q, want the home-relative default %q", name, candidates[0], spec.ResolveDefaultInput(home))
+		}
+		seen := map[string]bool{}
+		for _, candidate := range candidates {
+			if filepath.IsAbs(candidate) && candidate != spec.ResolveDefaultInput(home) {
+				t.Fatalf("%s: unexpected absolute candidate %q", name, candidate)
+			}
+			if seen[candidate] {
+				t.Fatalf("%s: duplicate candidate %q", name, candidate)
+			}
+			seen[candidate] = true
+		}
 	}
 }

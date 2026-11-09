@@ -248,6 +248,11 @@ Pi / Oh My Pi 说明：
 扫描并导出 CodeBuddy 使用数据：
 
 ```sh
+# POSIX（XDG）：$XDG_DATA_HOME/CodeBuddyExtension/Data，默认 ~/.local/share/CodeBuddyExtension/Data
+go run ./cmd/toktrail scan --source codebuddy-history --input "${XDG_DATA_HOME:-$HOME/.local/share}/CodeBuddyExtension/Data"
+go run ./cmd/toktrail export --source codebuddy-history --input "${XDG_DATA_HOME:-$HOME/.local/share}/CodeBuddyExtension/Data" --out ./codebuddy-batch.json --batch codebuddy-demo-1
+
+# Windows
 go run ./cmd/toktrail scan --source codebuddy-history --input "$HOME/AppData/Local/CodeBuddyExtension/Data"
 go run ./cmd/toktrail export --source codebuddy-history --input "$HOME/AppData/Local/CodeBuddyExtension/Data" --out ./codebuddy-batch.json --batch codebuddy-demo-1
 ```
@@ -260,7 +265,7 @@ CodeBuddy 说明：
 - 较新的索引以毫秒级 `startedAt` 记录时间。较早的会话既不记录每轮时间戳、消息文件也没有 `createdAt`，此时取该轮首条消息文件的修改时间（客户端在轮次开始时写入该文件）；两者都没有的请求会被隔离，而不是用编造的时间上传。
 - 较早会话还会留下 `{"inputTokens":null,...}` 的占位 usage 行（表示该轮未记录计数）。这类行不产生用量，静默跳过，不进入隔离区。
 - 模型标识不在 `index.json` 中，而是读取该轮第一个可归属的 assistant message 的 `extra.modelId`（用 `extra.requestId` 校验归属）；无法归属时记录上报 `unknown` 并附本地无值诊断，绝不猜测。
-- Windows 默认目录为 `~/AppData/Local/CodeBuddyExtension/Data`。其他平台或不同的按用户目录布局需显式授权到包含会话索引文件的目录。
+- 默认目录按平台取：POSIX 主机为 XDG 数据目录（`XDG_DATA_HOME` 为绝对路径时取 `$XDG_DATA_HOME/CodeBuddyExtension/Data`，否则取 `~/.local/share/CodeBuddyExtension/Data`）；Windows 为 `~/AppData/Local/CodeBuddyExtension/Data`。两种布局都会探测（先 XDG 后 AppData），因此托管授权不会指向本机不存在的目录。与之都不同的自定义布局需显式授权到包含会话索引文件的目录。
 
 WorkBuddy 说明：
 
@@ -305,7 +310,7 @@ go run ./cmd/toktrail service install \
   --grant openclaw-sqlite=$HOME/.openclaw/agents \
   --grant pi-jsonl=$HOME/.pi/agent/sessions \
   --grant omp-jsonl=$HOME/.omp/agent/sessions \
-  --grant codebuddy-history=$HOME/AppData/Local/CodeBuddyExtension/Data \
+  --grant codebuddy-history=$HOME/.local/share/CodeBuddyExtension/Data \
   --grant opencode-sqlite=$HOME/.local/share/opencode \
   --interval 30m
 ```

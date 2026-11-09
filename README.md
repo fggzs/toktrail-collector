@@ -243,6 +243,11 @@ go run ./cmd/toktrail export --source omp-jsonl --input ~/.omp/agent/sessions --
 Scan and export CodeBuddy IDE usage from a local directory:
 
 ```sh
+# POSIX: $XDG_DATA_HOME/CodeBuddyExtension/Data (default ~/.local/share/...)
+go run ./cmd/toktrail scan --source codebuddy-history --input "$HOME/.local/share/CodeBuddyExtension/Data"
+go run ./cmd/toktrail export --source codebuddy-history --input "$HOME/.local/share/CodeBuddyExtension/Data" --out ./codebuddy-batch.json --batch codebuddy-demo-1
+
+# Windows: ~/AppData/Local/CodeBuddyExtension/Data
 go run ./cmd/toktrail scan --source codebuddy-history --input "~/AppData/Local/CodeBuddyExtension/Data"
 go run ./cmd/toktrail export --source codebuddy-history --input "~/AppData/Local/CodeBuddyExtension/Data" --out ./codebuddy-batch.json --batch codebuddy-demo-1
 ```
@@ -263,7 +268,7 @@ OpenCode specifics:
 
 CodeBuddy specifics:
 
-- CodeBuddy IDE (CodeBuddy CN) stores one `index.json` per conversation under `~/AppData/Local/CodeBuddyExtension/Data/<userId>/CodeBuddyIDE/<userId>/history/<workspace>/<conversation>/`. The adapter discovers every such index below the granted path and reads only `requests[].usage` counters; `messages/*.json` conversation bodies are never read.
+- CodeBuddy IDE (CodeBuddy CN) stores one `index.json` per conversation under `<CodeBuddyExtension data>/<userId>/CodeBuddyIDE/<userId>/history/<workspace>/<conversation>/`. The adapter discovers every such index below the granted path and reads only `requests[].usage` counters; `messages/*.json` conversation bodies are never read. The data directory follows the XDG base spec on POSIX hosts (`$XDG_DATA_HOME/CodeBuddyExtension/Data`, default `~/.local/share/CodeBuddyExtension/Data`) and is `~/AppData/Local/CodeBuddyExtension/Data` on Windows; both layouts are probed, in that order.
 - Only `state == "complete"` requests are collected. Running requests publish partial usage snapshots that would double count once the request completes, and canceled requests lack a `startedAt` timestamp.
 - CodeBuddy semantics verified against real histories: `inputTokens` is the total input including cache reads, so the adapter uploads net `input` (`cachedMissTokens`), `cacheRead` (`cacheTokens`), and `cacheWrite` (`cachedWriteTokens`) separately; `totalTokens` must equal `inputTokens + outputTokens` and the cache split must sum to `inputTokens`, otherwise the request is quarantined.
 - The request index does not record model identifiers, so every CodeBuddy record reports `model: unknown` until a future format adds attribution.
@@ -279,6 +284,11 @@ Pi / Oh My Pi specifics:
 Scan and export CodeBuddy usage from its extension data directory:
 
 ```sh
+# POSIX (XDG): $XDG_DATA_HOME/CodeBuddyExtension/Data, default ~/.local/share/CodeBuddyExtension/Data
+go run ./cmd/toktrail scan --source codebuddy-history --input "${XDG_DATA_HOME:-$HOME/.local/share}/CodeBuddyExtension/Data"
+go run ./cmd/toktrail export --source codebuddy-history --input "${XDG_DATA_HOME:-$HOME/.local/share}/CodeBuddyExtension/Data" --out ./codebuddy-batch.json --batch codebuddy-demo-1
+
+# Windows
 go run ./cmd/toktrail scan --source codebuddy-history --input "$HOME/AppData/Local/CodeBuddyExtension/Data"
 go run ./cmd/toktrail export --source codebuddy-history --input "$HOME/AppData/Local/CodeBuddyExtension/Data" --out ./codebuddy-batch.json --batch codebuddy-demo-1
 ```
@@ -291,7 +301,7 @@ CodeBuddy specifics:
 - Recent indexes record `startedAt` in epoch milliseconds. Older conversations record no per-turn timestamp and no message `createdAt`, so the collector uses the modification time of the turn's first message file (the client writes that file when the turn starts); a turn with neither is quarantined instead of uploaded with an invented time.
 - Older conversations also keep `{"inputTokens":null,...}` placeholders for turns that never recorded counts. Those rows account for nothing and are skipped, not quarantined.
 - The model identifier is not in `index.json`. It is read from the turn's first attributable assistant message (`extra.modelId`, matched by `extra.requestId`); if nothing is attributable the record reports `unknown` and a value-free local issue, never a guess.
-- The default root is `~/AppData/Local/CodeBuddyExtension/Data` on Windows. Other platforms, or a per-user layout that differs, need an explicit grant pointing at the directory that contains the conversation index files.
+- The default root is the XDG data directory on POSIX hosts: `$XDG_DATA_HOME/CodeBuddyExtension/Data` when that variable holds an absolute path, otherwise `~/.local/share/CodeBuddyExtension/Data`; on Windows it is `~/AppData/Local/CodeBuddyExtension/Data`. Both layouts are probed (XDG first, then AppData), so a managed grant never points at a directory that cannot exist on the host. A per-user layout that differs from both needs an explicit grant pointing at the directory that contains the conversation index files.
 
 WorkBuddy specifics:
 
@@ -336,7 +346,7 @@ go run ./cmd/toktrail service install \
   --grant openclaw-sqlite=$HOME/.openclaw/agents \
   --grant pi-jsonl=$HOME/.pi/agent/sessions \
   --grant omp-jsonl=$HOME/.omp/agent/sessions \
-  --grant codebuddy-history=$HOME/AppData/Local/CodeBuddyExtension/Data \
+  --grant codebuddy-history=$HOME/.local/share/CodeBuddyExtension/Data \
   --grant opencode-sqlite=$HOME/.local/share/opencode \
   --interval 30m
 ```

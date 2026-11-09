@@ -1,6 +1,7 @@
 package registry
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -28,6 +29,15 @@ type ToolSpec struct {
 	DefaultSubpath []string // Path segments relative to user home directory
 	// FallbackSubpaths are probed in order only when the preferred path is absent.
 	FallbackSubpaths [][]string
+	// XDGDataSubpath, when non-empty, is an additional preferred layout
+	// anchored at the XDG data directory instead of the user home:
+	// $XDG_DATA_HOME/<segments> when that variable holds an absolute path
+	// (a relative value is invalid per the XDG spec and is ignored),
+	// otherwise <home>/.local/share/<segments>. Its candidate is probed
+	// before DefaultSubpath, so a POSIX install is detected ahead of the
+	// Windows-compatible AppData layout carried by the same spec. Empty for
+	// every home-relative tool.
+	XDGDataSubpath []string
 	// Mode classifies the collection path. The zero value behaves as
 	// ModeLocal so every pre-existing local tool spec is unchanged.
 	Mode SourceMode
@@ -121,15 +131,25 @@ var supportedTools = []ToolSpec{
 	},
 	{
 		// CodeBuddy IDE (CodeBuddy CN) stores per-request usage counters in
-		// its local session history under the user's AppData directory; the
+		// its local session history under an extension data directory; the
 		// adapter discovers .../history/<workspace>/<conversation>/index.json
 		// below whatever ancestor is granted, and also resolves the recorded
 		// model identifier from messages/*.json. Conversation bodies are
 		// never read, and only completed requests are collected.
+		//
+		// Two layouts exist for the same data, and neither is a fallback
+		// decoration: POSIX hosts follow the XDG base spec
+		// ($XDG_DATA_HOME/CodeBuddyExtension/Data, default
+		// ~/.local/share/CodeBuddyExtension/Data) while Windows keeps
+		// ~/AppData/Local/CodeBuddyExtension/Data. The XDG candidate is
+		// probed first so a Linux install is never reported as "not
+		// detected" just because the Windows path is absent; the AppData
+		// candidate keeps Windows (and WSL) working.
 		Tool:           "CodeBuddy",
 		Aliases:        []string{"codebuddy", "code buddy", "codebuddy cn", "codebuddy-cn", "codebuddycn", "codebuddy ide", "codebuddy-ide", "codebuddyide", "腾讯云代码助手"},
 		Source:         adapter.CodeBuddyHistorySource,
 		DefaultSubpath: []string{"AppData", "Local", "CodeBuddyExtension", "Data"},
+		XDGDataSubpath: []string{"CodeBuddyExtension", "Data"},
 		Mode:           ModeLocal,
 	},
 	{
@@ -208,17 +228,54 @@ func (t ToolSpec) ResolveDefaultInput(homeDir string) string {
 	return filepath.Join(parts...)
 }
 
-// DefaultInputCandidates returns the preferred directory followed by known
-// alternate layouts. It does not read the filesystem or grant access itself.
+// DefaultInputCandidates returns the layouts to probe, in order: the XDG data
+// layout first when the spec carries one, then the preferred home-relative
+// directory, then known alternate layouts. It does not read the filesystem or
+// grant access itself. Callers must treat CANDIDATE ORDER as authoritative:
+// candidates[0] is not always ResolveDefaultInput (CodeBuddy's POSIX layout is
+// probed ahead of the Windows default that ResolveDefaultInput still reports),
+// and a "not found" reason naming ResolveDefaultInput alone would point a Linux
+// user at a path that never exists on their host.
 func (t ToolSpec) DefaultInputCandidates(homeDir string) []string {
 	primary := t.ResolveDefaultInput(homeDir)
 	if primary == "" {
 		return nil
 	}
-	paths := []string{primary}
+	var paths []string
+	if xdg := t.xdgDataCandidate(homeDir); xdg != "" && xdg != primary {
+		paths = append(paths, xdg)
+	}
+	paths = append(paths, primary)
 	for _, subpath := range t.FallbackSubpaths {
 		parts := append([]string{homeDir}, subpath...)
 		paths = append(paths, filepath.Join(parts...))
 	}
 	return paths
+}
+
+// xdgDefaultDataSubpath is the XDG base-directory default relative to home,
+// used when XDG_DATA_HOME is unset, empty, or relative (the spec requires an
+// absolute value; anything else must be ignored rather than guessed at).
+var xdgDefaultDataSubpath = []string{".local", "share"}
+
+// xdgDataCandidate resolves the XDG data layout for a spec that declares one.
+// An absolute XDG_DATA_HOME wins so a user with a relocated data directory is
+// still detected from the managed grant path.
+func (t ToolSpec) xdgDataCandidate(homeDir string) string {
+	if len(t.XDGDataSubpath) == 0 {
+		return ""
+	}
+	base := strings.TrimSpace(os.Getenv("XDG_DATA_HOME"))
+	if !filepath.IsAbs(base) {
+		base = ""
+	}
+	if base == "" {
+		if strings.TrimSpace(homeDir) == "" {
+			return ""
+		}
+		parts := append([]string{homeDir}, xdgDefaultDataSubpath...)
+		base = filepath.Join(parts...)
+	}
+	parts := append([]string{base}, t.XDGDataSubpath...)
+	return filepath.Join(parts...)
 }

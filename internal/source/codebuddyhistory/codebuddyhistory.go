@@ -1,8 +1,16 @@
 // Package codebuddyhistory collects token usage from local CodeBuddy IDE
 // (CodeBuddy CN) session history. CodeBuddy stores one index.json per
-// conversation under
+// conversation under the extension data directory, in the same relative layout
+// on every platform:
 //
-//	~/AppData/Local/CodeBuddyExtension/Data/<userId>/CodeBuddyIDE/<userId>/history/<workspace>/<conversation>/index.json
+//	<data>/<userId>/CodeBuddyIDE/<userId>/history/<workspace>/<conversation>/index.json
+//
+// where <data> is the XDG data directory on POSIX hosts
+// ($XDG_DATA_HOME/CodeBuddyExtension/Data, default
+// ~/.local/share/CodeBuddyExtension/Data) and
+// ~/AppData/Local/CodeBuddyExtension/Data on Windows. The loader takes whatever
+// ancestor the grant names, so it is layout-agnostic; the registry decides
+// which layout is probed for the managed default directory.
 //
 // whose `requests[]` entries carry per-request usage counters. The adapter
 // is passive: it only reads index.json files (plus the small per-message
