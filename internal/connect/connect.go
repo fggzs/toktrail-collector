@@ -709,7 +709,6 @@ func Run(ctx context.Context, opt Options) (Result, error) {
 				}
 				continue
 			}
-			targetDir := spec.ResolveDefaultInput(homeDir)
 			statFn := os.Stat
 			if opt.statDefaultDir != nil {
 				// In-package test injection point: a deterministic stat
@@ -720,16 +719,32 @@ func Run(ctx context.Context, opt Options) (Result, error) {
 				// Production always uses os.Stat.
 				statFn = opt.statDefaultDir
 			}
-			stat, err := statFn(targetDir)
-			for _, candidate := range spec.DefaultInputCandidates(homeDir)[1:] {
-				if !errors.Is(err, os.ErrNotExist) {
-					break
-				}
+			// Probe every registered layout in candidate order, from the
+			// FIRST entry: candidates[0] is the layout the registry wants
+			// tried first and is not always ResolveDefaultInput (CodeBuddy
+			// probes its POSIX/XDG directory ahead of the Windows home-relative
+			// default). The first candidate that does not report
+			// os.ErrNotExist wins; a fault on any candidate stops the walk and
+			// is classified below. Only "every candidate absent" is an
+			// undetected tool.
+			candidates := spec.DefaultInputCandidates(homeDir)
+			targetDir := spec.ResolveDefaultInput(homeDir)
+			var stat os.FileInfo
+			var err error
+			for _, candidate := range candidates {
 				candidateStat, candidateErr := statFn(candidate)
-				if !errors.Is(candidateErr, os.ErrNotExist) {
-					targetDir, stat, err = candidate, candidateStat, candidateErr
-					break
+				if errors.Is(candidateErr, os.ErrNotExist) {
+					continue
 				}
+				targetDir, stat, err = candidate, candidateStat, candidateErr
+				break
+			}
+			if stat == nil && err == nil {
+				// Every candidate reported absence: the tool is not
+				// installed at any registered layout. Represent it as
+				// os.ErrNotExist so the classification below stays
+				// exactly one branch.
+				err = os.ErrNotExist
 			}
 			if err != nil {
 				if !errors.Is(err, os.ErrNotExist) {

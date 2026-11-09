@@ -243,6 +243,11 @@ go run ./cmd/toktrail export --source omp-jsonl --input ~/.omp/agent/sessions --
 Scan and export CodeBuddy IDE usage from a local directory:
 
 ```sh
+# POSIX: $XDG_DATA_HOME/CodeBuddyExtension/Data (default ~/.local/share/...)
+go run ./cmd/toktrail scan --source codebuddy-history --input "$HOME/.local/share/CodeBuddyExtension/Data"
+go run ./cmd/toktrail export --source codebuddy-history --input "$HOME/.local/share/CodeBuddyExtension/Data" --out ./codebuddy-batch.json --batch codebuddy-demo-1
+
+# Windows: ~/AppData/Local/CodeBuddyExtension/Data
 go run ./cmd/toktrail scan --source codebuddy-history --input "~/AppData/Local/CodeBuddyExtension/Data"
 go run ./cmd/toktrail export --source codebuddy-history --input "~/AppData/Local/CodeBuddyExtension/Data" --out ./codebuddy-batch.json --batch codebuddy-demo-1
 ```
@@ -263,10 +268,12 @@ OpenCode specifics:
 
 CodeBuddy specifics:
 
-- CodeBuddy IDE (CodeBuddy CN) stores one `index.json` per conversation under `~/AppData/Local/CodeBuddyExtension/Data/<userId>/CodeBuddyIDE/<userId>/history/<workspace>/<conversation>/`. The adapter discovers every such index below the granted path and reads only `requests[].usage` counters; `messages/*.json` conversation bodies are never read.
+- CodeBuddy IDE (CodeBuddy CN) stores one `index.json` per conversation under `<CodeBuddyExtension data>/<userId>/CodeBuddyIDE/<userId>/history/<workspace>/<conversation>/`. The adapter discovers every index proven to be a conversation below the granted path and reads its `requests[].usage` counters plus, only for a directory grant, the small per-message files needed for model attribution; message bodies are never interpreted, retained or exported, and a single-file grant reads no sibling file. The data directory follows the XDG base spec on POSIX hosts (`$XDG_DATA_HOME/CodeBuddyExtension/Data`, default `~/.local/share/CodeBuddyExtension/Data`) and is `~/AppData/Local/CodeBuddyExtension/Data` on Windows; both layouts are probed, in that order.
 - Only `state == "complete"` requests are collected. Running requests publish partial usage snapshots that would double count once the request completes, and canceled requests lack a `startedAt` timestamp.
-- CodeBuddy semantics verified against real histories: `inputTokens` is the total input including cache reads, so the adapter uploads net `input` (`cachedMissTokens`), `cacheRead` (`cacheTokens`), and `cacheWrite` (`cachedWriteTokens`) separately; `totalTokens` must equal `inputTokens + outputTokens` and the cache split must sum to `inputTokens`, otherwise the request is quarantined.
-- The request index does not record model identifiers, so every CodeBuddy record reports `model: unknown` until a future format adds attribution.
+- CodeBuddy semantics verified against real histories: `inputTokens` is the total prompt, split three ways as `cacheTokens` (cache read) + `cachedWriteTokens` (cache write) + `cachedMissTokens` (uncached). The adapter uploads the uncached share as `input`, `cacheTokens` as `cacheRead` and `cachedWriteTokens` as `cacheWrite`, so the three buckets add back up to the recorded prompt. `totalTokens` must equal `inputTokens + outputTokens`, the recorded split must not exceed `inputTokens`, and a non-zero `cachedMissTokens` must make the three shares sum exactly to `inputTokens`; a row that records the prompt without a recorded cache split is quarantined instead of exported with an invented split.
+- `startedAt` (epoch milliseconds, seconds tolerated) is the only accepted clock value: a request without a valid `startedAt` is quarantined rather than dated from a message file modification time, which restores and plain copies rewrite.
+- Older conversations keep `{"inputTokens":null,...}` placeholders for turns that never recorded counts; those rows account for nothing and are skipped, not quarantined.
+- The request index records no model identifier. It is read from the per-message files (`extra.modelId`): a turn is attributed only when every assistant message naming its `extra.requestId` reports the same model, and a turn that keeps the model on its single user message is accepted only when that message's own `extra.requestId` equals the request id. A mixed, unnamed or unreadable set reports `unknown` with a value-free local issue and still exports its counters.
 
 Pi / Oh My Pi specifics:
 
@@ -275,23 +282,6 @@ Pi / Oh My Pi specifics:
 - The four usage buckets are `input`/`output`/`cacheRead`/`cacheWrite` (OpenAI convention: disjoint, input excludes cache). The collector uploads them verbatim with no arithmetic; `reasoningTokens` is an informational subset of output and is not uploaded separately.
 - Both products read the same `PI_CODING_AGENT_DIR`/`PI_CODING_AGENT_SESSION_DIR` environment variable names; honoring them from two sources could scan one directory twice, so the first version ignores them and uses the fixed default paths only.
 - /fork copies the active branch into a new session file, which can re-count historical requests; branch and reset semantics need real-sample validation. Oh My Pi profile directories (`~/.omp/profiles/<name>/agent/sessions`) are not discovered automatically and need an explicit grant.
-
-Scan and export CodeBuddy usage from its extension data directory:
-
-```sh
-go run ./cmd/toktrail scan --source codebuddy-history --input "$HOME/AppData/Local/CodeBuddyExtension/Data"
-go run ./cmd/toktrail export --source codebuddy-history --input "$HOME/AppData/Local/CodeBuddyExtension/Data" --out ./codebuddy-batch.json --batch codebuddy-demo-1
-```
-
-CodeBuddy specifics:
-
-- CodeBuddy writes one conversation index per conversation (`history/<project>/<conversationId>/index.json`). Only indexes proven to be a conversation are read: either they sit at that `history/<project>/<conversationId>` depth, or they sit beside a `messages` directory. Workspace-level conversation lists (`history/<project>/index.json`), `current.json`, and `recent.json` are never read as usage.
-- Each `requests[]` entry is one user turn and is uploaded as a `delta` record. `inputTokens` is the total prompt of the turn; `cacheTokens` / `cachedWriteTokens` are the cached shares and the uncached share becomes the uploaded `input`. A zero `cachedMissTokens` means "not reported" (the client writes zeros when usage is not broken down), so it is never read as "the whole prompt is uncached".
-- Only requests recorded as `complete` are collected; running requests publish partial snapshots and canceled requests lack a `startedAt`, so both are skipped and a growing counter set is never exported. Contradictory counters (cache above the prompt, total disagreeing with prompt plus output, fractional or negative values) quarantine the request instead of uploading.
-- Recent indexes record `startedAt` in epoch milliseconds. Older conversations record no per-turn timestamp and no message `createdAt`, so the collector uses the modification time of the turn's first message file (the client writes that file when the turn starts); a turn with neither is quarantined instead of uploaded with an invented time.
-- Older conversations also keep `{"inputTokens":null,...}` placeholders for turns that never recorded counts. Those rows account for nothing and are skipped, not quarantined.
-- The model identifier is not in `index.json`. It is read from the turn's first attributable assistant message (`extra.modelId`, matched by `extra.requestId`); if nothing is attributable the record reports `unknown` and a value-free local issue, never a guess.
-- The default root is `~/AppData/Local/CodeBuddyExtension/Data` on Windows. Other platforms, or a per-user layout that differs, need an explicit grant pointing at the directory that contains the conversation index files.
 
 WorkBuddy specifics:
 
@@ -336,7 +326,7 @@ go run ./cmd/toktrail service install \
   --grant openclaw-sqlite=$HOME/.openclaw/agents \
   --grant pi-jsonl=$HOME/.pi/agent/sessions \
   --grant omp-jsonl=$HOME/.omp/agent/sessions \
-  --grant codebuddy-history=$HOME/AppData/Local/CodeBuddyExtension/Data \
+  --grant codebuddy-history=$HOME/.local/share/CodeBuddyExtension/Data \
   --grant opencode-sqlite=$HOME/.local/share/opencode \
   --interval 30m
 ```

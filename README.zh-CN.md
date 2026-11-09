@@ -248,6 +248,11 @@ Pi / Oh My Pi 说明：
 扫描并导出 CodeBuddy 使用数据：
 
 ```sh
+# POSIX（XDG）：$XDG_DATA_HOME/CodeBuddyExtension/Data，默认 ~/.local/share/CodeBuddyExtension/Data
+go run ./cmd/toktrail scan --source codebuddy-history --input "${XDG_DATA_HOME:-$HOME/.local/share}/CodeBuddyExtension/Data"
+go run ./cmd/toktrail export --source codebuddy-history --input "${XDG_DATA_HOME:-$HOME/.local/share}/CodeBuddyExtension/Data" --out ./codebuddy-batch.json --batch codebuddy-demo-1
+
+# Windows
 go run ./cmd/toktrail scan --source codebuddy-history --input "$HOME/AppData/Local/CodeBuddyExtension/Data"
 go run ./cmd/toktrail export --source codebuddy-history --input "$HOME/AppData/Local/CodeBuddyExtension/Data" --out ./codebuddy-batch.json --batch codebuddy-demo-1
 ```
@@ -255,12 +260,12 @@ go run ./cmd/toktrail export --source codebuddy-history --input "$HOME/AppData/L
 CodeBuddy 说明：
 
 - CodeBuddy 为每个会话写一个会话索引（`history/<project>/<conversationId>/index.json`）。只有被证实为会话的索引才会读取：位于该 `history/<project>/<conversationId>` 层级，或与 `messages` 目录同级。工作区级会话列表（`history/<project>/index.json`）、`current.json`、`recent.json` 不会被当作用量读取。
-- `requests[]` 中每个条目是一次用户请求，按 `delta` 记录上传。`inputTokens` 是该轮请求的总 prompt；`cacheTokens` / `cachedWriteTokens` 是其中的缓存份额，未缓存部分作为 `input` 上传。`cachedMissTokens` 为 0 表示"未上报"（客户端在未拆分用量时写 0），绝不解读为"整段 prompt 都未命中缓存"。
+- `requests[]` 中每个条目是一次用户请求，按 `delta` 记录上传。`inputTokens` 是该轮请求的总 prompt，真实数据按三路拆分：`cacheTokens`（cache 读）+ `cachedWriteTokens`（cache 写）+ `cachedMissTokens`（未命中）= `inputTokens`。上传时未命中部分作为 `input`、`cacheTokens` 作为 `cacheRead`、`cachedWriteTokens` 作为 `cacheWrite`，三个桶相加正好等于记录的 prompt。`totalTokens` 必须等于 `inputTokens + outputTokens`，记录的拆分不得超过 `inputTokens`，非 0 的 `cachedMissTokens` 必须使三路之和精确等于 `inputTokens`；只记录 prompt 而缺少缓存拆分的行会被隔离，绝不用编造的拆分上传。
 - 只采集记录为 `complete` 的请求；进行中的请求会发布部分用量快照、已取消的请求缺少 `startedAt`，两者都跳过，绝不导出仍在增长的计数；自相矛盾的计数（缓存大于 prompt、total 与 prompt+output 不符、小数或负数）会把该请求置入隔离区，而不是上传。
-- 较新的索引以毫秒级 `startedAt` 记录时间。较早的会话既不记录每轮时间戳、消息文件也没有 `createdAt`，此时取该轮首条消息文件的修改时间（客户端在轮次开始时写入该文件）；两者都没有的请求会被隔离，而不是用编造的时间上传。
+- `startedAt`（毫秒级，兼容秒级）是唯一认可的时间来源：缺少有效 `startedAt` 的请求会被隔离，而不是用消息文件的修改时间兜底（备份恢复和普通拷贝都会改写该时间）。
 - 较早会话还会留下 `{"inputTokens":null,...}` 的占位 usage 行（表示该轮未记录计数）。这类行不产生用量，静默跳过，不进入隔离区。
-- 模型标识不在 `index.json` 中，而是读取该轮第一个可归属的 assistant message 的 `extra.modelId`（用 `extra.requestId` 校验归属）；无法归属时记录上报 `unknown` 并附本地无值诊断，绝不猜测。
-- Windows 默认目录为 `~/AppData/Local/CodeBuddyExtension/Data`。其他平台或不同的按用户目录布局需显式授权到包含会话索引文件的目录。
+- 模型标识不在 `index.json` 中，而是从消息文件读取 `extra.modelId`：仅当该轮所有指认本次 `extra.requestId` 的 assistant message 都记录同一模型时才归属成功；若该轮没有单独的 assistant message，客户端会把模型记在唯一的那条 user message 上，此时仅当该消息自身的 `extra.requestId` 等于本次请求 id 才作为兜底来源。模型混杂、无法归属或不可读取时上报 `unknown` 并附本地无值诊断，绝不猜测，用量照常导出。只有目录级授权才读取消息文件，单文件授权只读该索引。
+- 默认目录按平台取：POSIX 主机为 XDG 数据目录（`XDG_DATA_HOME` 为绝对路径时取 `$XDG_DATA_HOME/CodeBuddyExtension/Data`，否则取 `~/.local/share/CodeBuddyExtension/Data`）；Windows 为 `~/AppData/Local/CodeBuddyExtension/Data`。两种布局都会探测（先 XDG 后 AppData），因此托管授权不会指向本机不存在的目录。与之都不同的自定义布局需显式授权到包含会话索引文件的目录。
 
 WorkBuddy 说明：
 
@@ -305,7 +310,7 @@ go run ./cmd/toktrail service install \
   --grant openclaw-sqlite=$HOME/.openclaw/agents \
   --grant pi-jsonl=$HOME/.pi/agent/sessions \
   --grant omp-jsonl=$HOME/.omp/agent/sessions \
-  --grant codebuddy-history=$HOME/AppData/Local/CodeBuddyExtension/Data \
+  --grant codebuddy-history=$HOME/.local/share/CodeBuddyExtension/Data \
   --grant opencode-sqlite=$HOME/.local/share/opencode \
   --interval 30m
 ```

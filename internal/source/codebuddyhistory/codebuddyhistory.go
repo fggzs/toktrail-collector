@@ -20,16 +20,18 @@
 //
 //   - inputTokens is the total prompt size of the turn, cached and uncached
 //     prompt bytes alike.
-//   - cacheTokens is the recorded cached (cache-read) share and
-//     cachedMissTokens the recorded uncached share. The client writes 0 for
-//     cachedMissTokens on turns whose usage was not broken down (the first
-//     turn of a conversation records inputTokens=98927 with cacheTokens=0 /
-//     cachedMissTokens=0), so a ZERO cachedMissTokens is read as "not
-//     reported", never as "the whole prompt is uncached"; the uncached share
-//     then follows from inputTokens minus the recorded cacheTokens.
-//   - cachedWriteTokens is carried as the cache-write share and is never
-//     subtracted from the prompt: recorded turns report it beside the split
-//     rather than inside it.
+//   - cacheTokens is the recorded cached (cache-read) share,
+//     cachedWriteTokens the cache-write share and cachedMissTokens the uncached
+//     share. The split is three-way and sums to the prompt: real histories
+//     satisfy inputTokens = cacheTokens + cachedWriteTokens + cachedMissTokens
+//     in 1289 of 1370 rows that record all four counters, and no row satisfies
+//     a read+miss form. The uncached share is therefore inputTokens minus the
+//     cache-read AND cache-write shares.
+//   - The client writes 0 for all three cache counters on turns whose usage was
+//     not broken down (the first turn of a conversation records
+//     inputTokens=98927 with cacheTokens=0 / cachedMissTokens=0), so a ZERO
+//     cachedMissTokens is read as "not reported", never as "the whole prompt is
+//     uncached"; no recorded row reports cache reads with a zero miss count.
 //   - totalTokens is inputTokens + outputTokens when present.
 //   - A row that records the prompt but omits cacheTokens or
 //     cachedWriteTokens only proves the total prompt: it does not prove those
@@ -60,18 +62,31 @@
 // lives in the per-message files as extra.modelId (extra is itself a JSON
 // string). A request is attributed only when every attributable assistant
 // message of the turn records the same model and names that request in
-// extra.requestId; a mixed, unnamed or unparsable set reports "unknown" with
-// a value-free local issue and still exports its counters. Probing stays
-// inside the granted directory: a single-file grant never reads the sibling
-// message files.
+// extra.requestId; the fallback is the exact one-message shape seen in real
+// data — the turn's original message list holds one file whose role is
+// "user", whose own extra.requestId matches and whose model is legal.
+// Anything else — mixed models, unnamed or unparsable messages, other roles,
+// multi-message turns, or an assistant side that is merely model-less —
+// reports "unknown" with a value-free local issue and still exports its
+// counters. Probing stays inside the granted directory: a single-file grant
+// never reads the sibling message files.
 //
 // Record identity is unchanged from codebuddy-history-v1: recordKey and
 // groupKey keep hashing "<conversation>/<request>" so records exported by
-// earlier builds keep deduplicating. codebuddy-history-v2 only enriches the
-// record with a resolved model; a stored record whose only difference is the
-// model metadata (unknown on one side, a recorded model on the other) stays
-// deduplicated instead of failing the immutable-history guard, while counter,
-// identity and timestamp changes still fail it.
+// earlier builds keep deduplicating. codebuddy-history-v3 differs from the
+// stored history only in ways the upgrades explain:
+//
+//   - v2 resolved the model; a stored record whose only difference is the
+//     model metadata (unknown on one side, a recorded model on the other)
+//     stays deduplicated.
+//   - v3 subtracts the cache-write share from the uploaded input too, so a
+//     stored v2 record stays deduplicated when its input differs by exactly
+//     that upgrade (or not at all) and every other field matches byte for
+//     byte.
+//
+// Counter drift beyond the upgrade, identity and timestamp changes still
+// fail the immutable-history guard, and stored history is never rewritten:
+// correcting historical counts is an explicit, auditable migration.
 //
 // The scan is stateless: every Load re-emits the full history with stable keys
 // and FilterForExport drops what the outbox or quarantine already hold.
@@ -100,8 +115,16 @@ import (
 const (
 	// codebuddyTool must match the canonical tool name in registry.SupportedTools.
 	codebuddyTool = "CodeBuddy"
-	// codebuddyAdapterVersion identifies the record layout produced here.
-	codebuddyAdapterVersion = "codebuddy-history-v2"
+	// codebuddyAdapterVersion identifies the record layout produced here:
+	// the three-way cache split (inputTokens = cache-read + cache-write +
+	// uncached, so the uploaded input subtracts the cache-write share too)
+	// and the single-user-message model fallback.
+	codebuddyAdapterVersion = "codebuddy-history-v3"
+	// codebuddyLegacyCountingVersion is the layout that subtracted only
+	// the cache-read share from the prompt. Stored records carrying it
+	// stay deduplicated across the v3 counting upgrade when the only
+	// differences are the ones that upgrade explains.
+	codebuddyLegacyCountingVersion = "codebuddy-history-v2"
 	// codebuddyLegacyAdapterVersion is the layout that never resolved a
 	// model. Stored records carrying it stay deduplicated when the only
 	// difference is the newly resolved model.
@@ -505,15 +528,24 @@ func normalizeUsage(u *requestUsage) (usageCounts, string) {
 	if !ok {
 		return counts, "invalid cachedMissTokens"
 	}
-	if cacheRead > totalInput {
-		return counts, "cacheTokens exceeds inputTokens"
+	// The recorded split is three-way: inputTokens is the cache-read share plus
+	// the cache-write share plus the uncached share. Verified against real
+	// histories (1289 of 1370 rows with all four counters satisfy it, and no row
+	// satisfies a read+miss form), so cachedWriteTokens belongs INSIDE the
+	// prompt: subtracting only cacheTokens would count the write share twice in
+	// the uploaded "input".
+	splitSum, addOK := adapter.AddUint64Checked(cacheRead, cacheWrite)
+	if !addOK || splitSum > totalInput {
+		return counts, "CodeBuddy usage cache split exceeds inputTokens"
 	}
-	uncached := totalInput - cacheRead
-	if missPresent && cacheMiss > 0 && cacheMiss != uncached {
-		// The recorded uncached share contradicts the recorded total:
-		// neither side may be silently preferred.
-		return counts, "CodeBuddy usage cache split does not sum to inputTokens"
+	if missPresent && cacheMiss > 0 {
+		if sum, sumOK := adapter.AddUint64Checked(splitSum, cacheMiss); !sumOK || sum != totalInput {
+			// The recorded uncached share contradicts the recorded total:
+			// neither side may be silently preferred.
+			return counts, "CodeBuddy usage cache split does not sum to inputTokens"
+		}
 	}
+	uncached := totalInput - splitSum
 	if totals, present, ok := countValue(u.TotalTokens); present {
 		if !ok {
 			return counts, "invalid totalTokens"
@@ -614,28 +646,40 @@ type modelInfo struct {
 // is attributed: a turn that mixed models, lost its request attribution, or
 // lists more messages than can be inspected reports unknown, because splitting
 // one turn's counters across models would be a guess.
+//
+// The user-message fallback is accepted ONLY for the exact shape recorded in
+// real data: the turn's ORIGINAL message list names exactly one file and that
+// file is the user message carrying this request's model metadata
+// (modelId/requestId on the user message of a one-message turn). The
+// original list length decides — a multi-message turn whose extra ids
+// happen to be unreadable is still multi-message — and the role must be
+// explicitly "user" with an exact requestId match and a legal model.
+// Tool, system or empty roles, multi-message turns and turns whose
+// assistant side is merely model-less stay unknown: a user message never
+// grants attribution by proximity, and borrowing a neighbouring turn's
+// model is worse than reporting "unknown".
 func (l *modelLookup) attribute(req indexRequest) (string, string, string) {
 	if l == nil {
 		return codebuddyUnknownModel, "", "request model not recorded; model reported unknown"
 	}
 	requestID := strings.TrimSpace(req.ID)
-	candidates := make([]string, 0, len(req.Messages))
+	ids := make([]string, 0, len(req.Messages))
 	for _, raw := range req.Messages {
 		id := strings.TrimSpace(raw)
 		// A message id is a file name, so it must never carry a path.
 		if id == "" || strings.ContainsAny(id, `/\`) || strings.Contains(id, "..") {
 			continue
 		}
-		candidates = append(candidates, id)
+		ids = append(ids, id)
 	}
-	if len(candidates) == 0 {
+	if len(ids) == 0 {
 		return codebuddyUnknownModel, "", "request model not recorded; model reported unknown"
 	}
-	if len(candidates) > maxModelProbes {
+	if len(ids) > maxModelProbes {
 		return codebuddyUnknownModel, "", "request lists more messages than can be inspected; model reported unknown"
 	}
 	resolved := ""
-	for _, id := range candidates {
+	for _, id := range ids {
 		info := l.message(id)
 		if !info.parsed || !strings.EqualFold(info.role, "assistant") {
 			continue
@@ -656,10 +700,20 @@ func (l *modelLookup) attribute(req indexRequest) (string, string, string) {
 		}
 		resolved = info.model
 	}
-	if resolved == "" {
-		return codebuddyUnknownModel, "", "request model not recorded; model reported unknown"
+	if resolved != "" {
+		return resolved, "", ""
 	}
-	return resolved, "", ""
+	if len(req.Messages) == 1 {
+		// The verified fallback shape: the turn stores only this user
+		// message and the client recorded the model on it. info.parsed
+		// guarantees ids[0] == this file, so its own extra.requestId and
+		// modelId carry the turn's metadata.
+		info := l.message(ids[0])
+		if info.parsed && strings.EqualFold(info.role, "user") && info.request == requestID && !info.invalid && info.model != "" {
+			return info.model, "", ""
+		}
+	}
+	return codebuddyUnknownModel, "", "request model not recorded; model reported unknown"
 }
 
 // insideRoot reports whether path stays inside root once cleaned. Both are
@@ -900,6 +954,26 @@ func filterKnownRecordsContext(ctx context.Context, stateDir string, records []a
 					// the request stays deduplicated.
 					continue
 				}
+				if legacyCountingEquivalent(previous, record) {
+					// The same request already sits in the immutable
+					// history exported with the v2 counting layout and
+					// differs only by what the v3 upgrade explains.
+					// The stored copy keeps the first configuration:
+					// correcting historical counts is an explicit,
+					// auditable migration, never this filter. The
+					// request stays deduplicated and never re-uploads
+					// under new counters.
+					continue
+				}
+				if layoutVersionEquivalent(previous, record) {
+					// The same request already sits in the immutable
+					// history with byte-identical counters, identity,
+					// model and timestamps; only the layout label
+					// moved on. Re-uploading it under the new label
+					// would duplicate history, so the stored copy
+					// stays.
+					continue
+				}
 				return nil, fmt.Errorf("CodeBuddy record %s changed after export; refusing to overwrite immutable history", key)
 			}
 			continue
@@ -963,5 +1037,146 @@ func modelMetadataEquivalent(stored []byte, fresh adapter.Record) bool {
 
 // codebuddyVersion reports whether version is a layout this source produced.
 func codebuddyVersion(version string) bool {
-	return version == codebuddyLegacyAdapterVersion || version == codebuddyAdapterVersion
+	return version == codebuddyLegacyAdapterVersion || version == codebuddyLegacyCountingVersion || version == codebuddyAdapterVersion
+}
+
+// layoutVersionEquivalent reports whether a stored record and a fresh record
+// describe the same request and differ ONLY by the layout version: identity,
+// counters, model and timestamps are byte for byte equal. Re-emitting an
+// unchanged request under a new layout label would duplicate history, so the
+// stored copy stays and the request remains deduplicated. Any other
+// difference, however small, still fails the immutable-history guard.
+func layoutVersionEquivalent(stored []byte, fresh adapter.Record) bool {
+	decoder := json.NewDecoder(bytes.NewReader(stored))
+	decoder.UseNumber()
+	var old adapter.Record
+	if err := decoder.Decode(&old); err != nil {
+		return false
+	}
+	storedVersion := adapter.StringField(old, "adapterVersion")
+	if !codebuddyVersion(storedVersion) {
+		return false
+	}
+	if storedVersion == adapter.StringField(fresh, "adapterVersion") {
+		// Same layout: byte-equality would have short-circuited the
+		// caller, so this is not a version difference at all.
+		return false
+	}
+	if adapter.StringField(fresh, "adapterVersion") != codebuddyAdapterVersion {
+		return false
+	}
+	if len(old) != len(fresh) {
+		return false
+	}
+	for key, value := range fresh {
+		if key == "adapterVersion" {
+			continue
+		}
+		previous, exists := old[key]
+		if !exists {
+			return false
+		}
+		left, errLeft := json.Marshal(previous)
+		right, errRight := json.Marshal(value)
+		if errLeft != nil || errRight != nil || !bytes.Equal(left, right) {
+			return false
+		}
+	}
+	return true
+}
+
+// legacyCountingEquivalent reports whether a stored codebuddy-history-v2
+// record and a fresh v3 record describe the same request across the v3
+// counting upgrade, so already-exported history stays deduplicated instead of
+// blocking the source behind the immutable-history guard.
+//
+// The v3 upgrade changed exactly two recorded values relative to v2:
+//
+//   - input: the v2 layout subtracted only the cache-read share from the
+//     prompt (input = inputTokens - cacheTokens); v3 subtracts the
+//     cache-write share as well (input = inputTokens - cacheTokens -
+//     cachedWriteTokens). The pair is accepted when fresh.input equals
+//     stored.input (this request recorded no cache-write share, or was
+//     exported with the new counting under the old version label) or when
+//     fresh.input + cacheWrite equals stored.input exactly. Any other input
+//     difference is real counter drift and still conflicts.
+//   - model: a v2 record whose model was unknown can resolve under v3 (the
+//     single-user-message fallback), so unknown -> recorded is accepted; a
+//     model recorded on both sides must agree byte for byte.
+//
+// Every other field — identity, timestamps, cacheRead, cacheWrite, output
+// and the rest of the payload — is compared byte for byte, so a record that
+// changed anything else still fails the guard. Old history is never
+// overwritten: the stored copy keeps the first configuration.
+func legacyCountingEquivalent(stored []byte, fresh adapter.Record) bool {
+	decoder := json.NewDecoder(bytes.NewReader(stored))
+	decoder.UseNumber()
+	var old adapter.Record
+	if err := decoder.Decode(&old); err != nil {
+		return false
+	}
+	if adapter.StringField(old, "adapterVersion") != codebuddyLegacyCountingVersion {
+		return false
+	}
+	if adapter.StringField(fresh, "adapterVersion") != codebuddyAdapterVersion {
+		return false
+	}
+	oldModel := adapter.StringField(old, "model")
+	freshModel := adapter.StringField(fresh, "model")
+	if oldModel != freshModel {
+		if oldModel != codebuddyUnknownModel && freshModel != codebuddyUnknownModel {
+			// Both sides resolved a model and they disagree: that is
+			// a re-attribution, not an upgrade artifact, so it stays
+			// a conflict.
+			return false
+		}
+	}
+	if len(old) != len(fresh) {
+		return false
+	}
+	for key, value := range fresh {
+		switch key {
+		case "adapterVersion", "input", "model":
+			continue
+		}
+		previous, exists := old[key]
+		if !exists {
+			return false
+		}
+		left, errLeft := json.Marshal(previous)
+		right, errRight := json.Marshal(value)
+		if errLeft != nil || errRight != nil || !bytes.Equal(left, right) {
+			return false
+		}
+	}
+	oldInput, oldOK := recordCount(old, "input")
+	freshInput, freshOK := recordCount(fresh, "input")
+	freshWrite, writeOK := recordCount(fresh, "cacheWrite")
+	if !oldOK || !freshOK || !writeOK {
+		return false
+	}
+	if freshInput == oldInput {
+		// No counting change for this request: the difference is the
+		// layout version (and possibly the model) alone.
+		return true
+	}
+	upgraded, ok := adapter.AddUint64Checked(freshInput, freshWrite)
+	return ok && upgraded == oldInput
+}
+
+// recordCount reads one decimal counter field of a record.
+func recordCount(record adapter.Record, field string) (uint64, bool) {
+	raw, exists := record[field]
+	if !exists {
+		return 0, false
+	}
+	text, ok := raw.(string)
+	if !ok {
+		return 0, false
+	}
+	value, err := strconv.ParseUint(text, 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return value, true
 }

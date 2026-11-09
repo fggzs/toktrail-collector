@@ -35,7 +35,9 @@ func TestLoadRecordsParsesCompletedRequests(t *testing.T) {
 	writeSessionIndex(t, root, "ws1", "conv1",
 		`{"messages":[],"requests":[`+
 			requestJSON("req-1", 1790000001000, 78677, 1609, 80286, 31360, 47317, 0)+","+
-			requestJSON("req-2", 1790000062000, 500, 100, 600, 400, 100, 25)+
+			// Real histories split the prompt three ways: cache read + cache
+			// write + uncached = inputTokens.
+			requestJSON("req-2", 1790000062000, 500, 100, 600, 300, 100, 100)+
 			`]}`)
 
 	res, err := LoadRecords(root)
@@ -60,7 +62,7 @@ func TestLoadRecordsParsesCompletedRequests(t *testing.T) {
 		t.Fatalf("unexpected usage mapping: %#v", first)
 	}
 	second := res.Records[1]
-	if second["input"] != "100" || second["cacheRead"] != "400" || second["cacheWrite"] != "25" || second["output"] != "100" {
+	if second["input"] != "100" || second["cacheRead"] != "300" || second["cacheWrite"] != "100" || second["output"] != "100" {
 		t.Fatalf("unexpected second mapping: %#v", second)
 	}
 	for _, rec := range res.Records {
@@ -114,6 +116,9 @@ func TestLoadRecordsQuarantinesBrokenUsage(t *testing.T) {
 	// missing core counter
 	writeSessionIndex(t, root, "ws1", "conv3",
 		`{"messages":[],"requests":[{"id":"bad-3","type":"craft","state":"complete","startedAt":1790000003000,"usage":{"outputTokens":10}}]}`)
+	// cache write pushes the recorded split above the prompt
+	writeSessionIndex(t, root, "ws1", "conv5",
+		`{"messages":[],"requests":[{"id":"bad-4","type":"craft","state":"complete","startedAt":1790000004000,"usage":{"inputTokens":100,"outputTokens":10,"totalTokens":110,"cacheTokens":50,"cachedWriteTokens":60,"cachedMissTokens":0}}]}`)
 	// malformed JSON file
 	writeSessionIndex(t, root, "ws1", "conv4", `{"requests":[`)
 
@@ -124,8 +129,38 @@ func TestLoadRecordsQuarantinesBrokenUsage(t *testing.T) {
 	if len(res.Records) != 0 {
 		t.Fatalf("broken usage must never become records: %#v", res)
 	}
-	if res.Quarantined != 4 {
-		t.Fatalf("expected 4 quarantined entries, got %d: %#v", res.Quarantined, res.Issues)
+	if res.Quarantined != 5 {
+		t.Fatalf("expected 5 quarantined entries, got %d: %#v", res.Quarantined, res.Issues)
+	}
+}
+
+// Real CodeBuddy histories split the prompt three ways:
+// inputTokens = cacheTokens + cachedWriteTokens + cachedMissTokens. Uploading
+// inputTokens minus cacheTokens alone counts the cache-write share twice in
+// "input" and quarantines any row whose uncached share is recorded.
+func TestLoadRecordsSplitsPromptThreeWays(t *testing.T) {
+	root := t.TempDir()
+	writeSessionIndex(t, root, "ws1", "conv1",
+		`{"messages":[],"requests":[`+
+			`{"id":"r1","type":"craft","state":"complete","startedAt":1791014053528,"usage":{"inputTokens":810607,"outputTokens":5719,"totalTokens":816326,"cacheTokens":751870,"cachedWriteTokens":56316,"cachedMissTokens":2421}},`+
+			`{"id":"r2","type":"craft","state":"complete","startedAt":1791014053529,"usage":{"inputTokens":100000,"outputTokens":0,"totalTokens":100000,"cacheTokens":0,"cachedWriteTokens":0,"cachedMissTokens":0}}`+
+			`]}`)
+
+	res, err := LoadRecords(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Quarantined != 0 || len(res.Records) != 2 {
+		t.Fatalf("three-way split must export: %d records, quarantined %d, issues %#v", len(res.Records), res.Quarantined, res.Issues)
+	}
+	first := res.Records[0]
+	if first["input"] != "2421" || first["cacheRead"] != "751870" || first["cacheWrite"] != "56316" || first["output"] != "5719" {
+		t.Fatalf("unexpected three-way mapping: %#v", first)
+	}
+	// A row whose split was never broken down keeps the whole prompt uncached.
+	second := res.Records[1]
+	if second["input"] != "100000" || second["cacheRead"] != "0" || second["cacheWrite"] != "0" {
+		t.Fatalf("not-reported split must stay uncached: %#v", second)
 	}
 }
 
