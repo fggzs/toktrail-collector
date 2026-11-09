@@ -148,7 +148,11 @@ const (
 	// tool-output-heavy messages above this size contribute no model.
 	maxMessageBytes = 2 << 20
 	// maxModelProbes bounds how many message files one request may probe.
-	maxModelProbes = 8
+	// requests[].messages lists the turn's whole context, so a long
+	// conversation names far more files than a short one: at 8 nearly
+	// every long turn reported "unknown" even though the model was
+	// recorded. The bound only limits I/O per request, not correctness.
+	maxModelProbes = 64
 	// safeIntegerLimit separates second and millisecond startedAt values.
 	safeIntegerLimit = 10000000000
 )
@@ -676,7 +680,12 @@ func (l *modelLookup) attribute(req indexRequest) (string, string, string) {
 		return codebuddyUnknownModel, "", "request model not recorded; model reported unknown"
 	}
 	if len(ids) > maxModelProbes {
-		return codebuddyUnknownModel, "", "request lists more messages than can be inspected; model reported unknown"
+		// requests[].messages carries the turn's whole context, so a long
+		// conversation names hundreds of files. The older entries belong to
+		// earlier requests, whose extra.requestId never matches this turn
+		// and is skipped anyway, so probing the newest tail bounds the
+		// per-request I/O without guessing at attribution.
+		ids = ids[len(ids)-maxModelProbes:]
 	}
 	resolved := ""
 	for _, id := range ids {
