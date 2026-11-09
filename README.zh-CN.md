@@ -260,7 +260,7 @@ go run ./cmd/toktrail export --source codebuddy-history --input "$HOME/AppData/L
 CodeBuddy 说明：
 
 - CodeBuddy 为每个会话写一个会话索引（`history/<project>/<conversationId>/index.json`）。只有被证实为会话的索引才会读取：位于该 `history/<project>/<conversationId>` 层级，或与 `messages` 目录同级。工作区级会话列表（`history/<project>/index.json`）、`current.json`、`recent.json` 不会被当作用量读取。
-- `requests[]` 中每个条目是一次用户请求，按 `delta` 记录上传。`inputTokens` 是该轮请求的总 prompt，未缓存部分（`inputTokens - cacheTokens`）作为 `input`、`cacheTokens` 作为 `cacheRead`、`cachedWriteTokens` 作为 `cacheWrite` 分别上传。`totalTokens` 必须等于 `inputTokens + outputTokens`，`cacheTokens` 不得大于 `inputTokens`，非 0 的 `cachedMissTokens` 必须等于 `inputTokens - cacheTokens`；只记录 prompt 而缺少缓存拆分的行会被隔离，绝不用编造的拆分上传。
+- `requests[]` 中每个条目是一次用户请求，按 `delta` 记录上传。`inputTokens` 是该轮请求的总 prompt，真实数据按三路拆分：`cacheTokens`（cache 读）+ `cachedWriteTokens`（cache 写）+ `cachedMissTokens`（未命中）= `inputTokens`。上传时未命中部分作为 `input`、`cacheTokens` 作为 `cacheRead`、`cachedWriteTokens` 作为 `cacheWrite`，三个桶相加正好等于记录的 prompt。`totalTokens` 必须等于 `inputTokens + outputTokens`，记录的拆分不得超过 `inputTokens`，非 0 的 `cachedMissTokens` 必须使三路之和精确等于 `inputTokens`；只记录 prompt 而缺少缓存拆分的行会被隔离，绝不用编造的拆分上传。
 - 只采集记录为 `complete` 的请求；进行中的请求会发布部分用量快照、已取消的请求缺少 `startedAt`，两者都跳过，绝不导出仍在增长的计数；自相矛盾的计数（缓存大于 prompt、total 与 prompt+output 不符、小数或负数）会把该请求置入隔离区，而不是上传。
 - `startedAt`（毫秒级，兼容秒级）是唯一认可的时间来源：缺少有效 `startedAt` 的请求会被隔离，而不是用消息文件的修改时间兜底（备份恢复和普通拷贝都会改写该时间）。
 - 较早会话还会留下 `{"inputTokens":null,...}` 的占位 usage 行（表示该轮未记录计数）。这类行不产生用量，静默跳过，不进入隔离区。
