@@ -488,9 +488,40 @@ func mergeManagedGrants(grantStore grants.Store, view managedconsent.View, homeD
 		if len(candidates) > 0 {
 			def = candidates[0]
 		}
-		// Keep an existing grant for a known layout, including a manually
-		// disabled one. A newly created preferred directory must not bypass
-		// the user's earlier decision to disable the alternate layout.
+		// A managed default grant this sync created earlier stays the
+		// tool's default layout even when the current environment no
+		// longer proposes its path: XDG_DATA_HOME set in the interactive
+		// shell but absent from the scheduled task changes the candidate
+		// list, and answering that change by adding a second default
+		// elsewhere would re-enable collection the user had manually
+		// disabled at the old path (or leave two enabled default layouts
+		// for one source). Migrating the default to another directory is
+		// an explicit user operation.
+		if managed, found := managedDefaultGrant(cfg, spec.Source); found {
+			if managed.Enabled {
+				continue
+			}
+			if managed.SystemDisabled {
+				// The sync itself disabled this grant (device identity
+				// change): the new device's explicit authorization for
+				// the same tool restores it. A user's manual disable is
+				// never restarted here.
+				restored, err := grantStore.EnableManagedGrant(spec.Source, managed.Input)
+				if err != nil {
+					return nil, nil, fmt.Errorf("restore system-disabled grant for tool %q: %w", tool, err)
+				}
+				if restored {
+					added = append(added, managed.Source+" "+managed.Input+" (restored after device change)")
+				}
+				continue
+			}
+			pending[tool] = "default-directory grant is manually disabled; re-enable it (toktrail sources enable) to resume collection"
+			continue
+		}
+		// No managed default exists yet: keep an existing user-authored
+		// grant for a known layout, including a manually disabled one. A
+		// newly created preferred directory must not bypass the user's
+		// earlier decision to disable the alternate layout.
 		for _, candidate := range candidates {
 			if _, exists := grantOf(cfg, spec.Source, candidate); exists {
 				def = candidate
@@ -566,6 +597,31 @@ func grantOf(cfg grants.Config, source, input string) (grants.Grant, bool) {
 		}
 	}
 	return grants.Grant{}, false
+}
+
+// managedDefaultGrant returns the managed grant that carries the tool's
+// default layout when the sync itself has created one — at any path, not
+// only the layouts the current environment proposes. Preference order: an
+// enabled grant (the default layout is active, nothing to do), then a
+// system-disabled one (restorable by this sync), then a manually disabled
+// one (the user's disable stands). Grants are never removed, reordered or
+// merged here; user-authored multi-path grants keep their own semantics.
+func managedDefaultGrant(cfg grants.Config, source string) (grants.Grant, bool) {
+	var disabled grants.Grant
+	found := false
+	for idx := range cfg.Grants {
+		grant := cfg.Grants[idx]
+		if grant.Source != source || !grant.Managed {
+			continue
+		}
+		if grant.Enabled || grant.SystemDisabled {
+			return grant, true
+		}
+		if !found {
+			disabled, found = grant, true
+		}
+	}
+	return disabled, found
 }
 
 func anyEnabledForSource(cfg grants.Config, source string) bool {

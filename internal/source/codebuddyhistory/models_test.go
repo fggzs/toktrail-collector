@@ -1,6 +1,7 @@
 package codebuddyhistory
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"toktrail-collector/internal/local/outbox"
 	"toktrail-collector/internal/local/quarantine"
 	"toktrail-collector/internal/source/adapter"
 )
@@ -852,3 +854,281 @@ func TestLoadRecordsNeverBorrowsUserMessageModelWithoutRequestMatch(t *testing.T
 	}
 }
 
+// TestLoadRecordsUserFallbackAcceptsOnlyVerifiedSingleMessageShape pins the
+// fallback's exact shape: the turn's ORIGINAL message list must hold exactly
+// one file, that file must record the user role, its extra.requestId must
+// match the request, and its model must be legal. Multi-message turns, other
+// roles, or turns whose assistant side is merely model-less report unknown —
+// the usage still exports and nothing quarantines.
+func TestLoadRecordsUserFallbackAcceptsOnlyVerifiedSingleMessageShape(t *testing.T) {
+	usage := `"usage":{"inputTokens":1000,"outputTokens":10,"totalTokens":1010,"cacheTokens":400,"cachedWriteTokens":0,"cachedMissTokens":600}`
+	cases := []struct {
+		name     string
+		index    string
+		fixtures func(t *testing.T, indexPath string)
+	}{
+		{
+			name:  "two user messages with conflicting models",
+			index: `{"requests":[{"id":"r1","type":"craft","messages":["m1","m2"],"state":"complete","startedAt":1791014053528,` + usage + `}]}`,
+			fixtures: func(t *testing.T, indexPath string) {
+				messageFixture(t, indexPath, "m1", "user", extraFixture(t, "r1", "model-a"))
+				messageFixture(t, indexPath, "m2", "user", extraFixture(t, "r1", "model-b"))
+			},
+		},
+		{
+			name:  "single tool message is not the verified shape",
+			index: `{"requests":[{"id":"r1","type":"craft","messages":["m1"],"state":"complete","startedAt":1791014053528,` + usage + `}]}`,
+			fixtures: func(t *testing.T, indexPath string) {
+				messageFixture(t, indexPath, "m1", "tool", extraFixture(t, "r1", "model-a"))
+			},
+		},
+		{
+			name:  "single system message is not the verified shape",
+			index: `{"requests":[{"id":"r1","type":"craft","messages":["m1"],"state":"complete","startedAt":1791014053528,` + usage + `}]}`,
+			fixtures: func(t *testing.T, indexPath string) {
+				messageFixture(t, indexPath, "m1", "system", extraFixture(t, "r1", "model-a"))
+			},
+		},
+		{
+			name:  "single message without a role is not the verified shape",
+			index: `{"requests":[{"id":"r1","type":"craft","messages":["m1"],"state":"complete","startedAt":1791014053528,` + usage + `}]}`,
+			fixtures: func(t *testing.T, indexPath string) {
+				body, err := json.Marshal(map[string]any{
+					"id":    "m1",
+					"extra": extraFixture(t, "r1", "model-a"),
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				writeFixture(t, filepath.Join(filepath.Dir(indexPath), messagesDirName, "m1.json"), string(body))
+			},
+		},
+		{
+			name:  "user model never covers a model-less assistant message",
+			index: `{"requests":[{"id":"r1","type":"craft","messages":["m1","m2"],"state":"complete","startedAt":1791014053528,` + usage + `}]}`,
+			fixtures: func(t *testing.T, indexPath string) {
+				messageFixture(t, indexPath, "m1", "user", extraFixture(t, "r1", "model-a"))
+				// The assistant message carries the request id but no
+				// modelId at all: an empty modelId would be an invalid
+				// identifier, so the field is omitted instead.
+				body, err := json.Marshal(map[string]any{
+					"role":      "assistant",
+					"message":   `{"role":"assistant"}`,
+					"id":        "m2",
+					"extra":     `{"requestId":"r1","modelName":"Hy4 preview"}`,
+					"createdAt": "2026-10-03T07:54:16.230Z",
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				writeFixture(t, filepath.Join(filepath.Dir(indexPath), messagesDirName, "m2.json"), string(body))
+			},
+		},
+		{
+			name:  "the original message count decides, not the readable remainder",
+			index: `{"requests":[{"id":"r1","type":"craft","messages":["m1","../escape"],"state":"complete","startedAt":1791014053528,` + usage + `}]}`,
+			fixtures: func(t *testing.T, indexPath string) {
+				messageFixture(t, indexPath, "m1", "user", extraFixture(t, "r1", "model-a"))
+			},
+		},
+		{
+			name:  "a single user message with an illegal model stays unknown",
+			index: `{"requests":[{"id":"r1","type":"craft","messages":["m1"],"state":"complete","startedAt":1791014053528,` + usage + `}]}`,
+			fixtures: func(t *testing.T, indexPath string) {
+				messageFixture(t, indexPath, "m1", "user", extraFixture(t, "r1", "bad\u0000model"))
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			indexPath := conversationFixture(t, root, "p1", "c1", tc.index)
+			tc.fixtures(t, indexPath)
+
+			result, err := LoadRecords(root)
+			if err != nil {
+				t.Fatalf("load: %v", err)
+			}
+			if len(result.Records) != 1 {
+				t.Fatalf("expected 1 record, got %d", len(result.Records))
+			}
+			if got := adapter.StringField(result.Records[0], "model"); got != codebuddyUnknownModel {
+				t.Fatalf("model = %q want unknown", got)
+			}
+			if result.Quarantined != 0 {
+				t.Fatalf("an unattributable model must not quarantine the usage, got %d", result.Quarantined)
+			}
+		})
+	}
+}
+
+// legacyCountingRecord rebuilds the record the v2 layout exported for the
+// same request: the old counting subtracted only the cache-read share from
+// the prompt, so its input differs from the v3 one.
+func legacyCountingRecord(t *testing.T, fresh adapter.Record, legacyInput, model string) adapter.Record {
+	t.Helper()
+	legacy := adapter.Record{}
+	for field, value := range fresh {
+		legacy[field] = value
+	}
+	legacy["adapterVersion"] = codebuddyLegacyCountingVersion
+	legacy["input"] = legacyInput
+	if model != "" {
+		legacy["model"] = model
+	}
+	return legacy
+}
+
+// seedOutboxBatch writes one batch file holding records and registers it in
+// the outbox ledger with the given status.
+func seedOutboxBatch(t *testing.T, stateDir, batchID, status string, records ...adapter.Record) string {
+	t.Helper()
+	payload, err := json.Marshal(map[string]any{"batchId": batchID, "records": records})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(stateDir, batchID+".json")
+	writeFixture(t, path, string(payload))
+	store := outbox.New(stateDir)
+	if _, err := store.AddPending(outbox.AddBatchOptions{
+		BatchID:     batchID,
+		File:        path,
+		Source:      adapter.CodeBuddyHistorySource,
+		RecordCount: len(records),
+	}); err != nil {
+		t.Fatalf("seed outbox: %v", err)
+	}
+	if status == outbox.StatusSynced {
+		if err := store.MarkSynced(outbox.Receipt{BatchID: batchID, Status: "accepted", AcceptedRecords: len(records), ReceivedAt: time.Now().UTC()}); err != nil {
+			t.Fatalf("mark synced: %v", err)
+		}
+	}
+	return path
+}
+
+// TestFilterForExportUpgradesLegacyV2CountingHistory pins the v3 upgrade
+// path: a request already exported under the v2 counting layout (input
+// subtracted only the cache-read share) stays deduplicated when the v3
+// three-way split changes its uploaded input, in every store that holds
+// immutable history. The stored copy is never rewritten, genuinely new
+// requests of the same scan still export, and a counter difference the
+// upgrade does not explain still fails the guard.
+func TestFilterForExportUpgradesLegacyV2CountingHistory(t *testing.T) {
+	// r-write records a non-zero cache-write share: the v2 layout exported
+	// input=100 for it (inputTokens minus the cache-read share), the v3
+	// layout exports input=0. r-new is a genuinely new request.
+	root := t.TempDir()
+	conversationFixture(t, root, "p1", "c1", `{
+	  "messages": [{"id":"m1","type":"text","role":"assistant","isComplete":false},{"id":"m2","type":"text","role":"assistant","isComplete":false}],
+	  "requests": [
+	    {"id":"r-write","type":"craft","messages":["m1"],"state":"complete","startedAt":1791014053528,
+	     "usage":{"inputTokens":1000,"outputTokens":10,"totalTokens":1010,"cacheTokens":900,"cachedWriteTokens":100,"cachedMissTokens":0}},
+	    {"id":"r-new","type":"craft","messages":["m2"],"state":"complete","startedAt":1791014424445,
+	     "usage":{"inputTokens":500,"outputTokens":20,"totalTokens":520,"cacheTokens":400,"cachedWriteTokens":0,"cachedMissTokens":100}}
+	  ]
+	}`)
+	indexPath := filepath.Join(root, "p1", "c1", indexFileName)
+	messageFixture(t, indexPath, "m1", "assistant", extraFixture(t, "r-write", "model-a"))
+	messageFixture(t, indexPath, "m2", "assistant", extraFixture(t, "r-new", "model-b"))
+
+	result, err := LoadRecords(root)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	var legacyExported, newRequest adapter.Record
+	for _, record := range result.Records {
+		switch adapter.StringField(record, "occurredAt") {
+		case "2026-10-03T07:54:13Z":
+			legacyExported = record
+		case "2026-10-03T08:00:24Z":
+			newRequest = record
+		}
+	}
+	if legacyExported == nil || newRequest == nil {
+		t.Fatalf("expected both requests to load, got %d records", len(result.Records))
+	}
+	if got := adapter.StringField(legacyExported, "input"); got != "0" {
+		t.Fatalf("the v3 layout must subtract the cache-write share, input = %q", got)
+	}
+	if got := adapter.StringField(legacyExported, "adapterVersion"); got != codebuddyAdapterVersion {
+		t.Fatalf("adapterVersion = %q", got)
+	}
+	legacy := legacyCountingRecord(t, legacyExported, "100", "")
+
+	stores := []struct {
+		name   string
+		outbox bool
+		status string
+	}{
+		{"pending outbox", true, outbox.StatusPending},
+		{"synced outbox", true, outbox.StatusSynced},
+		{"quarantine store", false, ""},
+	}
+	for _, tc := range stores {
+		t.Run(tc.name, func(t *testing.T) {
+			stateDir := t.TempDir()
+			var storedPath string
+			if tc.outbox {
+				storedPath = seedOutboxBatch(t, stateDir, "batch-v2", tc.status, legacy)
+			} else {
+				seedKnown(t, stateDir, legacy)
+			}
+			before, readErr := os.ReadFile(storedPath)
+			if tc.outbox && readErr != nil {
+				t.Fatalf("read seeded batch: %v", readErr)
+			}
+
+			filtered, err := filterKnownRecordsContext(context.Background(), stateDir, result.Records)
+			if err != nil {
+				t.Fatalf("the v2 counting upgrade must not fail the filter: %v", err)
+			}
+			if len(filtered) != 1 || adapter.StringField(filtered[0], "recordKey") != adapter.StringField(newRequest, "recordKey") {
+				t.Fatalf("only the genuinely new request may export, got %#v", filtered)
+			}
+			if tc.outbox {
+				after, readErr := os.ReadFile(storedPath)
+				if readErr != nil {
+					t.Fatalf("re-read seeded batch: %v", readErr)
+				}
+				if !bytes.Equal(before, after) {
+					t.Fatal("stored history must not be rewritten by the upgrade")
+				}
+			} else {
+				entries, loadErr := quarantine.New(stateDir).Load()
+				if loadErr != nil {
+					t.Fatalf("load quarantine: %v", loadErr)
+				}
+				if len(entries) != 1 {
+					t.Fatalf("expected the seeded entry to survive, got %d entries", len(entries))
+				}
+				var stored adapter.Record
+				if err := json.Unmarshal(entries[0].Record, &stored); err != nil {
+					t.Fatalf("decode quarantined record: %v", err)
+				}
+				if !sameRecord(stored, legacy) {
+					t.Fatalf("the quarantined history must keep the stored copy, got %s", entries[0].Record)
+				}
+			}
+		})
+	}
+
+	// Combined upgrade: the stored v2 export predates model resolution too.
+	combined := legacyCountingRecord(t, legacyExported, "100", codebuddyUnknownModel)
+	stateDir := t.TempDir()
+	seedKnown(t, stateDir, combined)
+	filtered, err := filterKnownRecordsContext(context.Background(), stateDir, []adapter.Record{legacyExported})
+	if err != nil {
+		t.Fatalf("legacy counting plus unknown -> resolved model must stay deduplicated: %v", err)
+	}
+	if len(filtered) != 0 {
+		t.Fatalf("the upgraded request must not re-upload, got %#v", filtered)
+	}
+
+	// A counter difference the v3 upgrade does not explain still fails.
+	drifted := legacyCountingRecord(t, legacyExported, "50", "")
+	driftedState := t.TempDir()
+	seedKnown(t, driftedState, drifted)
+	if _, err := filterKnownRecordsContext(context.Background(), driftedState, []adapter.Record{legacyExported}); err == nil {
+		t.Fatal("an input difference the v3 upgrade does not explain must stay a conflict")
+	}
+}

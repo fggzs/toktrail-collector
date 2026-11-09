@@ -231,11 +231,18 @@ func (t ToolSpec) ResolveDefaultInput(homeDir string) string {
 // DefaultInputCandidates returns the layouts to probe, in order: the XDG data
 // layout first when the spec carries one, then the preferred home-relative
 // directory, then known alternate layouts. It does not read the filesystem or
-// grant access itself. Callers must treat CANDIDATE ORDER as authoritative:
-// candidates[0] is not always ResolveDefaultInput (CodeBuddy's POSIX layout is
-// probed ahead of the Windows default that ResolveDefaultInput still reports),
-// and a "not found" reason naming ResolveDefaultInput alone would point a Linux
-// user at a path that never exists on their host.
+// grant access itself. Layout probing is an all-platform strategy by design,
+// not a POSIX-only one: the same client stores its data tree under either
+// layout depending on the host, an XDG_DATA_HOME override can relocate the
+// directory on any OS, and probing a missing directory costs nothing.
+// ResolveDefaultInput stays each platform's preferred default (AppData on
+// Windows) for user-facing hints; candidate order only decides which
+// existing layout a fresh grant lands on. Callers must treat CANDIDATE ORDER
+// as authoritative: candidates[0] is not always ResolveDefaultInput
+// (CodeBuddy's XDG layout is probed ahead of the Windows default that
+// ResolveDefaultInput still reports), and a "not found" reason naming
+// ResolveDefaultInput alone would point a Linux user at a path that never
+// exists on their host.
 func (t ToolSpec) DefaultInputCandidates(homeDir string) []string {
 	primary := t.ResolveDefaultInput(homeDir)
 	if primary == "" {
