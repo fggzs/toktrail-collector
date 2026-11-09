@@ -537,3 +537,152 @@ func TestFilterForExportWithoutStateDirKeepsRecords(t *testing.T) {
 		t.Fatalf("stateless filter must keep every record, got %d", len(fresh))
 	}
 }
+
+// A turn that stores no assistant message records the model on its single user
+// message instead (verified on recorded data). Reporting those turns as
+// "unknown" threw away a model the client had plainly recorded.
+func TestLoadRecordsAttributesModelFromRequestMatchingUserMessage(t *testing.T) {
+	root := t.TempDir()
+	conversationFixture(t, root, "p1", "c1", `{
+	  "requests": [{"id":"r1","type":"craft","messages":["m1"],"state":"complete","startedAt":1791014053528,
+	    "usage":{"inputTokens":1000,"outputTokens":10,"totalTokens":1010,"cacheTokens":400,"cachedMissTokens":600}}]
+	}`)
+	indexPath := filepath.Join(root, "p1", "c1", indexFileName)
+	messageFixture(t, indexPath, "m1", "user", extraFixture(t, "r1", "glm-5.2"))
+
+	result, err := LoadRecords(root)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(result.Records) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(result.Records))
+	}
+	if got := adapter.StringField(result.Records[0], "model"); got != "glm-5.2" {
+		t.Fatalf("model = %q want the modelId recorded on the user message", got)
+	}
+	if result.Quarantined != 0 {
+		t.Fatalf("a user-message attribution must not quarantine, got %d", result.Quarantined)
+	}
+	if len(result.Issues) != 0 {
+		t.Fatalf("a resolved model must not report an issue, got %#v", result.Issues)
+	}
+}
+
+// The user-message fallback is never by proximity: without a matching
+// extra.requestId the model stays unknown, because borrowing a neighbouring
+// turn's model is worse than reporting "unknown".
+func TestLoadRecordsNeverBorrowsUserMessageModelWithoutRequestMatch(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		requestID string
+	}{
+		{"foreign request id", "r0"},
+		{"absent request id", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			conversationFixture(t, root, "p1", "c1", `{
+			  "requests": [{"id":"r1","type":"craft","messages":["m1"],"state":"complete","startedAt":1791014053528,
+			    "usage":{"inputTokens":1000,"outputTokens":10,"totalTokens":1010,"cacheTokens":400,"cachedMissTokens":600}}]
+			}`)
+			indexPath := filepath.Join(root, "p1", "c1", indexFileName)
+			messageFixture(t, indexPath, "m1", "user", extraFixture(t, tc.requestID, "other-model"))
+
+			result, err := LoadRecords(root)
+			if err != nil {
+				t.Fatalf("load: %v", err)
+			}
+			if len(result.Records) != 1 {
+				t.Fatalf("expected 1 record, got %d", len(result.Records))
+			}
+			if got := adapter.StringField(result.Records[0], "model"); got != codebuddyUnknownModel {
+				t.Fatalf("model = %q want unknown", got)
+			}
+			if result.Quarantined != 0 {
+				t.Fatalf("an unusable user-message model must not quarantine, got %d", result.Quarantined)
+			}
+		})
+	}
+}
+
+// The immutable-history guard accepts one enrichment only: a stored record whose
+// model was never resolved may be re-emitted with the model a later build can
+// attribute. Everything else about the record must be identical, and a stored
+// RESOLVED model is never rewritten.
+func TestFilterForExportKeepsUnknownModelRecordsDeduplicated(t *testing.T) {
+	root := t.TempDir()
+	conversationFixture(t, root, "p1", "c1", `{
+	  "requests": [{"id":"r1","type":"craft","messages":["m1"],"state":"complete","startedAt":1791014053528,
+	    "usage":{"inputTokens":1000,"outputTokens":10,"totalTokens":1010,"cacheTokens":400,"cachedMissTokens":600}}]
+	}`)
+	indexPath := filepath.Join(root, "p1", "c1", indexFileName)
+	messageFixture(t, indexPath, "m1", "user", extraFixture(t, "r1", "glm-5.2"))
+
+	result, err := LoadRecords(root)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(result.Records) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(result.Records))
+	}
+	record := result.Records[0]
+	key := adapter.StringField(record, "recordKey")
+	if adapter.StringField(record, "model") != "glm-5.2" {
+		t.Fatalf("fixture must resolve a model, got %q", adapter.StringField(record, "model"))
+	}
+	stateDir := t.TempDir()
+
+	// v2 export of the same request that could not attribute the model.
+	unresolved := adapter.Record{}
+	for field, value := range record {
+		unresolved[field] = value
+	}
+	unresolved["model"] = codebuddyUnknownModel
+	raw, err := json.Marshal(unresolved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := quarantine.New(stateDir)
+	if err := store.Append([]quarantine.Entry{{
+		Source:    adapter.CodeBuddyHistorySource,
+		RecordKey: key,
+		Record:    raw,
+		Reason:    "test",
+	}}); err != nil {
+		t.Fatalf("seed quarantine: %v", err)
+	}
+	fresh, err := filterKnownRecordsContext(context.Background(), stateDir, result.Records)
+	if err != nil {
+		t.Fatalf("an unattributed export of the same request must not fail the filter: %v", err)
+	}
+	for _, entry := range fresh {
+		if adapter.StringField(entry, "recordKey") == key {
+			t.Fatalf("the unresolved export must stay deduplicated")
+		}
+	}
+
+	// A resolved model is never rewritten to a different one.
+	different := adapter.Record{}
+	for field, value := range record {
+		different[field] = value
+	}
+	different["model"] = "another-model"
+	rawDiff, err := json.Marshal(different)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A fresh state directory: the previous one already holds this record key.
+	stateDir2 := t.TempDir()
+	store = quarantine.New(stateDir2)
+	if err := store.Append([]quarantine.Entry{{
+		Source:    adapter.CodeBuddyHistorySource,
+		RecordKey: key,
+		Record:    rawDiff,
+		Reason:    "test",
+	}}); err != nil {
+		t.Fatalf("seed quarantine: %v", err)
+	}
+	if _, err := filterKnownRecordsContext(context.Background(), stateDir2, result.Records); err == nil {
+		t.Fatal("a resolved model must never be replaced by a different one")
+	}
+}

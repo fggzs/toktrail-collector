@@ -264,7 +264,7 @@ CodeBuddy 说明：
 - 只采集记录为 `complete` 的请求；进行中的请求会发布部分用量快照、已取消的请求缺少 `startedAt`，两者都跳过，绝不导出仍在增长的计数；自相矛盾的计数（缓存大于 prompt、total 与 prompt+output 不符、小数或负数）会把该请求置入隔离区，而不是上传。
 - 较新的索引以毫秒级 `startedAt` 记录时间。较早的会话既不记录每轮时间戳、消息文件也没有 `createdAt`，此时取该轮首条消息文件的修改时间（客户端在轮次开始时写入该文件）；两者都没有的请求会被隔离，而不是用编造的时间上传。
 - 较早会话还会留下 `{"inputTokens":null,...}` 的占位 usage 行（表示该轮未记录计数）。这类行不产生用量，静默跳过，不进入隔离区。
-- 模型标识不在 `index.json` 中，而是读取该轮第一个可归属的 assistant message 的 `extra.modelId`（用 `extra.requestId` 校验归属）；无法归属时记录上报 `unknown` 并附本地无值诊断，绝不猜测。
+- 模型标识不在 `index.json` 中，而是读取该轮第一个可归属的 assistant message 的 `extra.modelId`（用 `extra.requestId` 校验归属）；若该轮没有单独的 assistant message，客户端会把模型记在唯一的那条 user message 上，此时仅当该消息自身的 `extra.requestId` 等于本次请求 id 才作为兜底来源。无法归属时记录上报 `unknown` 并附本地无值诊断，绝不猜测。
 - 默认目录按平台取：POSIX 主机为 XDG 数据目录（`XDG_DATA_HOME` 为绝对路径时取 `$XDG_DATA_HOME/CodeBuddyExtension/Data`，否则取 `~/.local/share/CodeBuddyExtension/Data`）；Windows 为 `~/AppData/Local/CodeBuddyExtension/Data`。两种布局都会探测（先 XDG 后 AppData），因此托管授权不会指向本机不存在的目录。与之都不同的自定义布局需显式授权到包含会话索引文件的目录。
 
 WorkBuddy 说明：

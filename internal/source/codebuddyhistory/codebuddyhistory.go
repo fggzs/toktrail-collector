@@ -63,9 +63,12 @@
 // The model identifier is not recorded in index.json. It lives in the
 // per-message files as extra.modelId (extra is itself a JSON string), so the
 // loader resolves one recorded model per request by reading the first
-// attributable assistant message that belongs to that request. Message files
-// are bounded and probing is capped; when nothing is attributable the record
-// reports "unknown" and a value-free local issue, never a guess.
+// attributable assistant message that belongs to that request. Turns that never
+// store a separate assistant message record the model on their single user
+// message instead; that message is used as a fallback, and only when its own
+// extra.requestId proves it belongs to this request. Message files are bounded
+// and probing is capped; when nothing is attributable the record reports
+// "unknown" and a value-free local issue, never a guess.
 //
 // Record identity is unchanged from codebuddy-history-v1: recordKey and
 // groupKey keep hashing "<conversation>/<request>" so records exported by
@@ -554,10 +557,22 @@ type modelInfo struct {
 // attribute returns the model recorded for the request. A non-empty reason
 // quarantines the request (a present but illegal model identifier); an empty
 // model with a diagnostic means "unknown" (the usage still exports).
+//
+// The assistant message is the primary source. Some turns never store a
+// separate assistant message: the request carries exactly one user message
+// whose extra already names the model (verified against recorded data, where a
+// single-message request records modelId/modelName/requestId on the user
+// message). Those turns were reported as "unknown" although the client had
+// recorded the model. Such a message is accepted ONLY when its recorded
+// requestId equals this request's id — the user message never grants
+// attribution by proximity, because borrowing a neighbouring turn's model is
+// worse than reporting "unknown".
 func (l *modelLookup) attribute(req indexRequest) (string, string, string) {
 	if l == nil {
 		return codebuddyUnknownModel, "", "request model not recorded; model reported unknown"
 	}
+	requestID := strings.TrimSpace(req.ID)
+	fallbackModel := ""
 	probes := 0
 	for _, id := range req.Messages {
 		if probes >= maxModelProbes {
@@ -570,21 +585,30 @@ func (l *modelLookup) attribute(req indexRequest) (string, string, string) {
 		}
 		probes++
 		info := l.message(id)
-		if !info.parsed || !strings.EqualFold(info.role, "assistant") {
+		if !info.parsed {
 			continue
 		}
-		if info.request != "" && info.request != strings.TrimSpace(req.ID) {
+		if info.request != "" && info.request != requestID {
 			// The file says it belongs to another request: never borrow
 			// another turn's model.
 			continue
 		}
-		if info.invalid {
-			return "", "invalid request model identifier", ""
+		if strings.EqualFold(info.role, "assistant") {
+			if info.invalid {
+				return "", "invalid request model identifier", ""
+			}
+			if info.model == "" {
+				continue
+			}
+			return info.model, "", ""
 		}
-		if info.model == "" {
-			continue
+		if info.request == requestID && !info.invalid && info.model != "" && fallbackModel == "" {
+			// A non-assistant message that PROVES it belongs to this request.
+			fallbackModel = info.model
 		}
-		return info.model, "", ""
+	}
+	if fallbackModel != "" {
+		return fallbackModel, "", ""
 	}
 	return codebuddyUnknownModel, "", "request model not recorded; model reported unknown"
 }
@@ -815,11 +839,11 @@ func filterKnownRecordsContext(ctx context.Context, stateDir string, records []a
 		}
 		if previous, exists := known[key]; exists {
 			if !bytes.Equal(previous, canonical) {
-				if legacyRecordEquivalent(previous, record) {
-					// A codebuddy-history-v1 export of the same request
-					// differs only by the model this build can now
-					// resolve: the request is already in the immutable
-					// history, so it stays deduplicated.
+				if unknownModelEquivalent(previous, record) {
+					// A stored export of the same request differs only by
+					// the model it could not resolve: the request is
+					// already in the immutable history, so it stays
+					// deduplicated.
 					continue
 				}
 				return nil, fmt.Errorf("CodeBuddy record %s changed after export; refusing to overwrite immutable history", key)
@@ -831,17 +855,25 @@ func filterKnownRecordsContext(ctx context.Context, stateDir string, records []a
 	return fresh, nil
 }
 
-// legacyRecordEquivalent reports whether a stored codebuddy-history-v1 record
-// describes exactly the same request as fresh, apart from the model that v1
-// could not record and the layout version.
-func legacyRecordEquivalent(stored []byte, fresh adapter.Record) bool {
+// unknownModelEquivalent reports whether a stored record describes exactly the
+// same request as fresh, apart from a model the stored export could not
+// resolve. Both versions qualify: codebuddy-history-v1 never resolved a model,
+// and codebuddy-history-v2 leaves requests whose message files are gone
+// unattributable. A build that later CAN resolve the model must not fail the
+// immutable-history guard, because the usage is identical and only the
+// attribution improved. A stored record whose model was already resolved is
+// never equivalent to a different one: that would be a rewrite, not an
+// enrichment.
+func unknownModelEquivalent(stored []byte, fresh adapter.Record) bool {
 	decoder := json.NewDecoder(bytes.NewReader(stored))
 	decoder.UseNumber()
 	var old adapter.Record
 	if err := decoder.Decode(&old); err != nil {
 		return false
 	}
-	if adapter.StringField(old, "adapterVersion") != codebuddyLegacyAdapterVersion {
+	switch adapter.StringField(old, "adapterVersion") {
+	case codebuddyAdapterVersion, codebuddyLegacyAdapterVersion:
+	default:
 		return false
 	}
 	if adapter.StringField(old, "model") != codebuddyUnknownModel {
