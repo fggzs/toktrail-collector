@@ -22,7 +22,7 @@ Collector 的设计目标是：即使没有账号，本地检查仍然可用。`
 - OpenClaw SQLite（`openclaw-sqlite`）：仅读取 `transcript_events.event_json` 用量事件。
 - Pi session JSONL（`pi-jsonl`）：仅读取 assistant message 与 usage/model_usage 条目计数。
 - Oh My Pi session JSONL（`omp-jsonl`）：与 Pi 相同格式，读取 `~/.omp` 下的会话。
-- CodeBuddy IDE 会话历史（`codebuddy-history`）：被动读取 CodeBuddy IDE 本地数据目录下 `index.json` 的每请求用量计数；仅采集已完成请求，不读取对话正文。
+- CodeBuddy IDE 会话历史（`codebuddy-history`）：被动读取 CodeBuddy IDE 本地数据目录下 `index.json` 的每请求用量计数，并从 messages 文件解析记录的模型标识与旧版本的轮次时间戳；仅采集已完成请求，不读取对话正文。
 - OpenCode CLI 会话 SQLite（`opencode-sqlite`）：被动读取 `~/.local/share/opencode/opencode.db` 中 assistant 消息的用量计数；不读取消息正文。
 - 用于集成与兼容测试的合成/自由格式 `usage-json`。
 
@@ -245,6 +245,23 @@ Pi / Oh My Pi 说明：
 - 两个产品共用同名环境变量 `PI_CODING_AGENT_DIR`/`PI_CODING_AGENT_SESSION_DIR`；为避免同一目录被两个 source 各扫一遍造成双计，首版不读取这些环境变量，只用固定默认路径。
 - /fork 复制活动分支到新会话文件时可能重复计入历史请求；分支/重置语义需真实样本验收。omp 的 profile 目录（`~/.omp/profiles/<name>/agent/sessions`）首版不自动发现，需显式授权。
 
+扫描并导出 CodeBuddy 使用数据：
+
+```sh
+go run ./cmd/toktrail scan --source codebuddy-history --input "$HOME/AppData/Local/CodeBuddyExtension/Data"
+go run ./cmd/toktrail export --source codebuddy-history --input "$HOME/AppData/Local/CodeBuddyExtension/Data" --out ./codebuddy-batch.json --batch codebuddy-demo-1
+```
+
+CodeBuddy 说明：
+
+- CodeBuddy 为每个会话写一个会话索引（`history/<project>/<conversationId>/index.json`）。只有被证实为会话的索引才会读取：位于该 `history/<project>/<conversationId>` 层级，或与 `messages` 目录同级。工作区级会话列表（`history/<project>/index.json`）、`current.json`、`recent.json` 不会被当作用量读取。
+- `requests[]` 中每个条目是一次用户请求，按 `delta` 记录上传。`inputTokens` 是该轮请求的总 prompt；`cacheTokens` / `cachedWriteTokens` 是其中的缓存份额，未缓存部分作为 `input` 上传。`cachedMissTokens` 为 0 表示"未上报"（客户端在未拆分用量时写 0），绝不解读为"整段 prompt 都未命中缓存"。
+- 只采集记录为 `complete` 的请求；进行中的请求会发布部分用量快照、已取消的请求缺少 `startedAt`，两者都跳过，绝不导出仍在增长的计数；自相矛盾的计数（缓存大于 prompt、total 与 prompt+output 不符、小数或负数）会把该请求置入隔离区，而不是上传。
+- 较新的索引以毫秒级 `startedAt` 记录时间。较早的会话既不记录每轮时间戳、消息文件也没有 `createdAt`，此时取该轮首条消息文件的修改时间（客户端在轮次开始时写入该文件）；两者都没有的请求会被隔离，而不是用编造的时间上传。
+- 较早会话还会留下 `{"inputTokens":null,...}` 的占位 usage 行（表示该轮未记录计数）。这类行不产生用量，静默跳过，不进入隔离区。
+- 模型标识不在 `index.json` 中，而是读取该轮第一个可归属的 assistant message 的 `extra.modelId`（用 `extra.requestId` 校验归属）；无法归属时记录上报 `unknown` 并附本地无值诊断，绝不猜测。
+- Windows 默认目录为 `~/AppData/Local/CodeBuddyExtension/Data`。其他平台或不同的按用户目录布局需显式授权到包含会话索引文件的目录。
+
 WorkBuddy 说明：
 
 - 该 source 仅被动读取 JSONL：只读 WorkBuddy 追加写入的 session JSONL 文件，绝不写入。
@@ -289,6 +306,7 @@ go run ./cmd/toktrail service install \
   --grant pi-jsonl=$HOME/.pi/agent/sessions \
   --grant omp-jsonl=$HOME/.omp/agent/sessions \
   --grant codebuddy-history=$HOME/AppData/Local/CodeBuddyExtension/Data \
+  --grant opencode-sqlite=$HOME/.local/share/opencode \
   --interval 30m
 ```
 

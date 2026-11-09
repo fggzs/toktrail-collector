@@ -2515,11 +2515,11 @@ Commands:
                              tickets or raw records)
   bind                       bind this device to toktrail-server using explicit upload authorization
   status                     check bound device authorization from toktrail-server
-  scan [--source usage-json|codex-jsonl|claude-code-jsonl|deepseek-harness|workbuddy-jsonl|qwen-jsonl|kimi-cli-jsonl|kimi-code-jsonl|zcode-sqlite|hermes-sqlite|openclaw-sqlite|pi-jsonl|omp-jsonl|codebuddy-history|opencode-sqlite] --input <path>
-                              locally scan usage records without network/account access
-  preview [--source usage-json|codex-jsonl|claude-code-jsonl|deepseek-harness|workbuddy-jsonl|qwen-jsonl|kimi-cli-jsonl|kimi-code-jsonl|zcode-sqlite|hermes-sqlite|openclaw-sqlite|pi-jsonl|omp-jsonl|codebuddy-history|opencode-sqlite] --input <path>
-                              preview local usage records
-  export [--source usage-json|codex-jsonl|claude-code-jsonl|deepseek-harness|workbuddy-jsonl|qwen-jsonl|kimi-cli-jsonl|kimi-code-jsonl|zcode-sqlite|hermes-sqlite|openclaw-sqlite|pi-jsonl|omp-jsonl|codebuddy-history|opencode-sqlite] --input <path> --out <batch.json>
+scan [--source usage-json|codex-jsonl|claude-code-jsonl|deepseek-harness|workbuddy-jsonl|qwen-jsonl|kimi-cli-jsonl|kimi-code-jsonl|zcode-sqlite|hermes-sqlite|openclaw-sqlite|pi-jsonl|omp-jsonl|codebuddy-history|opencode-sqlite] --input <path>
+                            locally scan usage records without network/account access
+preview [--source usage-json|codex-jsonl|claude-code-jsonl|deepseek-harness|workbuddy-jsonl|qwen-jsonl|kimi-cli-jsonl|kimi-code-jsonl|zcode-sqlite|hermes-sqlite|openclaw-sqlite|pi-jsonl|omp-jsonl|codebuddy-history|opencode-sqlite] --input <path>
+                            preview local usage records
+export [--source usage-json|codex-jsonl|claude-code-jsonl|deepseek-harness|workbuddy-jsonl|qwen-jsonl|kimi-cli-jsonl|kimi-code-jsonl|zcode-sqlite|hermes-sqlite|openclaw-sqlite|pi-jsonl|omp-jsonl|codebuddy-history|opencode-sqlite] --input <path> --out <batch.json>
                               export local records and add a pending outbox batch
   sync [--file <batch.json>]  preflight device authorization, then upload a local batch
                               (or the oldest pending outbox batch) with the current
