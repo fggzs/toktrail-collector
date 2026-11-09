@@ -1132,3 +1132,63 @@ func TestFilterForExportUpgradesLegacyV2CountingHistory(t *testing.T) {
 		t.Fatal("an input difference the v3 upgrade does not explain must stay a conflict")
 	}
 }
+
+// TestFilterForExportAbsorbsLayoutVersionLabelChange pins the baseline
+// follow-up: a stored record that matches the fresh one byte for byte except
+// for the layout version stays deduplicated no matter which side resolved a
+// model, so a pure layout relabel never re-uploads history. Identity or
+// timestamp differences still fail the guard.
+func TestFilterForExportAbsorbsLayoutVersionLabelChange(t *testing.T) {
+	// A request whose model stays unknown on both sides.
+	root := t.TempDir()
+	conversationFixture(t, root, "p1", "c1", `{
+	  "requests": [{"id":"r1","type":"craft","messages":[],"state":"complete","startedAt":1791014053528,
+	    "usage":{"inputTokens":1000,"outputTokens":10,"totalTokens":1010,"cacheTokens":400,"cachedWriteTokens":0,"cachedMissTokens":600}}]
+	}`)
+	result, err := LoadRecords(root)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(result.Records) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(result.Records))
+	}
+	fresh := result.Records[0]
+
+	for _, stored := range []struct {
+		version string
+		label   string
+	}{
+		{codebuddyLegacyAdapterVersion, "v1"},
+		{codebuddyLegacyCountingVersion, "v2"},
+	} {
+		t.Run("stored "+stored.label+" with identical payload", func(t *testing.T) {
+			relabeled := adapter.Record{}
+			for field, value := range fresh {
+				relabeled[field] = value
+			}
+			relabeled["adapterVersion"] = stored.version
+			stateDir := t.TempDir()
+			seedKnown(t, stateDir, relabeled)
+			filtered, err := filterKnownRecordsContext(context.Background(), stateDir, []adapter.Record{fresh})
+			if err != nil {
+				t.Fatalf("a pure layout relabel must stay deduplicated: %v", err)
+			}
+			if len(filtered) != 0 {
+				t.Fatalf("the relabeled request must not re-upload, got %#v", filtered)
+			}
+		})
+	}
+
+	// An identity difference is never absorbed by a version change.
+	relabeled := adapter.Record{}
+	for field, value := range fresh {
+		relabeled[field] = value
+	}
+	relabeled["adapterVersion"] = codebuddyLegacyAdapterVersion
+	relabeled["occurredAt"] = "2020-01-01T00:00:00Z"
+	driftedState := t.TempDir()
+	seedKnown(t, driftedState, relabeled)
+	if _, err := filterKnownRecordsContext(context.Background(), driftedState, []adapter.Record{fresh}); err == nil {
+		t.Fatal("a timestamp difference must still fail the immutable-history guard")
+	}
+}

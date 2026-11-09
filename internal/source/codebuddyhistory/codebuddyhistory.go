@@ -965,6 +965,15 @@ func filterKnownRecordsContext(ctx context.Context, stateDir string, records []a
 					// under new counters.
 					continue
 				}
+				if layoutVersionEquivalent(previous, record) {
+					// The same request already sits in the immutable
+					// history with byte-identical counters, identity,
+					// model and timestamps; only the layout label
+					// moved on. Re-uploading it under the new label
+					// would duplicate history, so the stored copy
+					// stays.
+					continue
+				}
 				return nil, fmt.Errorf("CodeBuddy record %s changed after export; refusing to overwrite immutable history", key)
 			}
 			continue
@@ -1029,6 +1038,51 @@ func modelMetadataEquivalent(stored []byte, fresh adapter.Record) bool {
 // codebuddyVersion reports whether version is a layout this source produced.
 func codebuddyVersion(version string) bool {
 	return version == codebuddyLegacyAdapterVersion || version == codebuddyLegacyCountingVersion || version == codebuddyAdapterVersion
+}
+
+// layoutVersionEquivalent reports whether a stored record and a fresh record
+// describe the same request and differ ONLY by the layout version: identity,
+// counters, model and timestamps are byte for byte equal. Re-emitting an
+// unchanged request under a new layout label would duplicate history, so the
+// stored copy stays and the request remains deduplicated. Any other
+// difference, however small, still fails the immutable-history guard.
+func layoutVersionEquivalent(stored []byte, fresh adapter.Record) bool {
+	decoder := json.NewDecoder(bytes.NewReader(stored))
+	decoder.UseNumber()
+	var old adapter.Record
+	if err := decoder.Decode(&old); err != nil {
+		return false
+	}
+	storedVersion := adapter.StringField(old, "adapterVersion")
+	if !codebuddyVersion(storedVersion) {
+		return false
+	}
+	if storedVersion == adapter.StringField(fresh, "adapterVersion") {
+		// Same layout: byte-equality would have short-circuited the
+		// caller, so this is not a version difference at all.
+		return false
+	}
+	if adapter.StringField(fresh, "adapterVersion") != codebuddyAdapterVersion {
+		return false
+	}
+	if len(old) != len(fresh) {
+		return false
+	}
+	for key, value := range fresh {
+		if key == "adapterVersion" {
+			continue
+		}
+		previous, exists := old[key]
+		if !exists {
+			return false
+		}
+		left, errLeft := json.Marshal(previous)
+		right, errRight := json.Marshal(value)
+		if errLeft != nil || errRight != nil || !bytes.Equal(left, right) {
+			return false
+		}
+	}
+	return true
 }
 
 // legacyCountingEquivalent reports whether a stored codebuddy-history-v2
