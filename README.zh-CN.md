@@ -127,6 +127,8 @@ go run ./cmd/toktrail scan --source codex-jsonl --input ~/.codex/sessions
 go run ./cmd/toktrail export --source codex-jsonl --input ~/.codex/sessions --out ./codex-batch.json --batch codex-demo-1
 ```
 
+Codex 使用统一的流式 JSONL 字段投影：大型正文、图片和工具输出只流式验证，不完整载入内存，不再受共享读取器的 16 MiB 单行限制。模型、时间与用量校验，以及原物理行号和去重键保持不变；损坏日志仍明确报错，不会静默跳过。无需设置行大小参数。
+
 扫描并导出 Claude Code 使用数据：
 
 ```sh

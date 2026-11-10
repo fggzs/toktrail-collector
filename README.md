@@ -130,6 +130,8 @@ go run ./cmd/toktrail scan --source codex-jsonl --input ~/.codex/sessions
 go run ./cmd/toktrail export --source codex-jsonl --input ~/.codex/sessions --out ./codex-batch.json --batch codex-demo-1
 ```
 
+Codex uses one streaming JSONL projection path: large message bodies, images and tool output are validated without being materialized, rather than passing through the shared reader's 16 MiB line limit. Model, timestamp and counter validation, physical line numbers and deduplication keys remain unchanged; malformed logs still fail explicitly instead of being silently skipped. No line-size tuning is required.
+
 Scan and export Claude Code usage from a local directory:
 
 ```sh

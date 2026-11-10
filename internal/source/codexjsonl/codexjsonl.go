@@ -77,7 +77,8 @@ func LoadRecords(path string) ([]adapter.Record, error) {
 }
 
 // loadRecordsContext scans with cancellation support: the context is checked
-// during file discovery, once per file, and once per line. On cancellation it
+// during file discovery, once per file/line, and between streaming input
+// buffers while reading a giant line. On cancellation it
 // returns ctx.Err() (matching errors.Is(context.Canceled) or
 // errors.Is(context.DeadlineExceeded)) and no partial result, so a scan cut
 // short by its deadline never commits half of the records.
@@ -124,26 +125,22 @@ func loadRecordsContext(ctx context.Context, path string) (adapter.LoadResult, e
 // switch) but never includes a recorded model value.
 func loadCodexJSONLFile(ctx context.Context, path string, log *codexIssueLog) ([]adapter.Record, error) {
 	var events []codexEvent
-	if err := jsonl.WalkLinesContext(ctx, path, func(line jsonl.Line) error {
+	if err := walkProjectedCodexLines(ctx, path, func(raw map[string]any, line int) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		raw, err := jsonl.DecodeObject(line.Text)
+		obs, ok, err := parseCodexObservation(raw, line)
 		if err != nil {
-			return fmt.Errorf("%s:%d: %w", line.File, line.Number, err)
-		}
-		obs, ok, err := parseCodexObservation(raw, line.Number)
-		if err != nil {
-			return fmt.Errorf("%s:%d: %w", line.File, line.Number, err)
+			return fmt.Errorf("%s:%d: %w", path, line, err)
 		}
 		if ok {
 			events = append(events, codexEvent{Timestamp: obs.Timestamp, Line: obs.Line, Observation: &obs})
 			return nil
 		}
 		if adapter.StringAny(raw["type"]) == "turn_context" {
-			turn, err := parseCodexTurnContext(raw, line.Number)
+			turn, err := parseCodexTurnContext(raw, line)
 			if err != nil {
-				return fmt.Errorf("%s:%d: %w", line.File, line.Number, err)
+				return fmt.Errorf("%s:%d: %w", path, line, err)
 			}
 			events = append(events, codexEvent{Timestamp: turn.Timestamp, Line: turn.Line, TurnContext: &turn})
 		}
