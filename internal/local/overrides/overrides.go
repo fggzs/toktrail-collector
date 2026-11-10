@@ -120,9 +120,10 @@ type Entry struct {
 
 // Ledger is the whole override store.
 type Ledger struct {
-	Schema    int              `json:"schema"`
-	DeviceID  string           `json:"deviceId,omitempty"`
-	ServerURL string           `json:"serverUrl,omitempty"`
+	Schema    int    `json:"schema"`
+	DeviceID  string `json:"deviceId,omitempty"`
+	ServerURL string `json:"serverUrl,omitempty"`
+	DataEpoch int64  `json:"dataEpoch,omitempty"`
 	// Entries maps record key -> override state.
 	Entries map[string]Entry `json:"entries"`
 }
@@ -192,6 +193,9 @@ func (s Store) Save(l Ledger) error {
 // per-entry key identity, status/content pairing, record canonicality,
 // and the device/server binding whenever entries exist.
 func (l Ledger) Validate() error {
+	if l.DataEpoch < 0 {
+		return errors.New("corrupt override ledger: invalid data epoch")
+	}
 	if l.Schema != Schema {
 		return fmt.Errorf("corrupt override ledger: unsupported schema %d", l.Schema)
 	}
@@ -322,6 +326,9 @@ func (l Ledger) BindingError(stateDir string) error {
 	st, err := statedir.New(stateDir).Load()
 	if err != nil {
 		return err
+	}
+	if st.DataEpoch != l.DataEpoch {
+		return errors.New("override ledger belongs to another data epoch; old baselines cannot be promoted after recollection")
 	}
 	if st.DeviceID == "" {
 		return fmt.Errorf("the override ledger belongs to device %s, but this collector is not bound; the override baseline is device-bound — bind the device or remove the override ledger only if you accept abandoning it", l.DeviceID)

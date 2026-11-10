@@ -16,7 +16,9 @@ import (
 	"strings"
 	"time"
 
+	"toktrail-collector/internal/local/outbox"
 	"toktrail-collector/internal/local/statedir"
+	"toktrail-collector/internal/syncclient"
 )
 
 type Options struct {
@@ -57,14 +59,19 @@ type responseError struct {
 
 type bindResponse struct {
 	Device struct {
-		DeviceID          string    `json:"deviceId"`
-		ApplicationID     string    `json:"applicationId"`
-		ExternalSubjectID string    `json:"externalSubjectId"`
-		DeviceName        string    `json:"deviceName"`
-		Platform          string    `json:"platform"`
-		ConsentRevision   int64     `json:"consentRevision"`
-		BoundAt           time.Time `json:"boundAt"`
-		Replay            bool      `json:"replay"`
+		DeviceID          string `json:"deviceId"`
+		ApplicationID     string `json:"applicationId"`
+		ExternalSubjectID string `json:"externalSubjectId"`
+		DeviceName        string `json:"deviceName"`
+		Platform          string `json:"platform"`
+		ConsentRevision   int64  `json:"consentRevision"`
+		// DataEpoch is the device's data epoch on servers that speak the
+		// device-usage-reset feature; nil on older servers and treated
+		// as epoch 0. Only an INITIAL bind (a state that had no device
+		// bound yet) adopts it — see Run.
+		DataEpoch *int64    `json:"dataEpoch,omitempty"`
+		BoundAt   time.Time `json:"boundAt"`
+		Replay    bool      `json:"replay"`
 	} `json:"device"`
 	Error *responseError `json:"error,omitempty"`
 }
@@ -240,6 +247,15 @@ func Run(ctx context.Context, store statedir.Store, opt Options) (Result, error)
 	if err := opt.validate(); err != nil {
 		return Result{}, err
 	}
+	// Force-recollect journal guard: while a reset is in flight the state
+	// directory belongs to the recollect driver, and a manual bind with a
+	// new ticket must not swap the device identity out from under it
+	// (connect already refuses earlier; this covers the direct `toktrail
+	// bind` path). Bind offers no bypass — the recollect flow never
+	// re-binds, it keeps the device secret and id.
+	if err := syncclient.CheckResetJournal(store.Dir()); err != nil {
+		return Result{}, err
+	}
 	st, err := store.Load()
 	if err != nil {
 		return Result{}, err
@@ -349,6 +365,41 @@ func Run(ctx context.Context, store statedir.Store, opt Options) (Result, error)
 			category: CategoryInvalidResponse,
 			status:   resp.StatusCode,
 		}
+	}
+	// Data epoch adoption: only the INITIAL bind of a not-yet-bound state
+	// takes the receipt's dataEpoch (0 on both old servers and fresh
+	// devices). A state that already carries a bound device keeps its
+	// local epoch verbatim — re-binding must never advance it — so a
+	// server that usage-reset the device since leaves this state epoch-
+	// stale on purpose: the syncclient epoch fences then block every
+	// ordinary upload until the force-recollect flow (whose journal
+	// transition is the only other epoch writer) completes. This keeps an
+	// old outbox from being quietly relabeled with the new epoch.
+	//
+	// One fail-closed exception: an UNBOUND state that still carries an
+	// ordinary outbox (a backup that lost its device identity, or a
+	// hand-stripped device.json) must not adopt a non-zero receipt epoch
+	// either. Adopting it would promote those pre-identity batches onto
+	// the receipt's post-reset epoch and let them upload as if they were
+	// new-epoch data — exactly the backfill the fence exists to stop.
+	// The bind is refused; the operator restores the device identity or
+	// runs the force-recollect flow instead.
+	wasBound := st.DeviceID != ""
+	receiptEpoch := int64(0)
+	if body.Device.DataEpoch != nil && *body.Device.DataEpoch > 0 {
+		receiptEpoch = *body.Device.DataEpoch
+	}
+	if !wasBound {
+		if receiptEpoch > 0 {
+			ordinaryBatches, ledgerErr := outbox.New(store.Dir()).Load()
+			switch {
+			case ledgerErr != nil:
+				return Result{}, errors.New("bind refused: cannot verify the local outbox while the device state carries no bound identity and the server reports a non-zero data epoch; restore the device identity or resolve the state directory before binding")
+			case len(ordinaryBatches.Batches) > 0:
+				return Result{}, errors.New("bind refused: the state directory carries ordinary batches but no bound device identity, and the server reports a non-zero data epoch; restoring a backup must not promote those batches onto the reset device — restore the device identity or run the force-recollect flow")
+			}
+		}
+		st.DataEpoch = receiptEpoch
 	}
 	st.PendingBindFingerprint = ""
 	st.LastBindFingerprint = fingerprint

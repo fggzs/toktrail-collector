@@ -99,6 +99,9 @@ func RunOverride(ctx context.Context, opt OverrideOptions) (OverrideResult, erro
 	if stateDir == "" {
 		return OverrideResult{}, errors.New("override requires a state directory")
 	}
+	if err := syncclient.CheckResetJournal(stateDir); err != nil {
+		return OverrideResult{}, err
+	}
 	now := opt.Now
 	if now == nil {
 		now = time.Now
@@ -130,6 +133,9 @@ func RunOverride(ctx context.Context, opt OverrideOptions) (OverrideResult, erro
 		return OverrideResult{}, err
 	}
 	if hasLedger {
+		if ledger.DataEpoch != st.DataEpoch {
+			return OverrideResult{}, errors.New("override ledger belongs to another data epoch; refusing to replay old contents")
+		}
 		if ledger.DeviceID != st.DeviceID {
 			return OverrideResult{}, fmt.Errorf("the override ledger was created for device %q, but this collector is bound as %q; the override baseline is device-bound — remove %s only if you accept abandoning it", ledger.DeviceID, st.DeviceID, ledgerStore.Path())
 		}
@@ -169,6 +175,10 @@ func RunOverride(ctx context.Context, opt OverrideOptions) (OverrideResult, erro
 		return result, fmt.Errorf("override stopped before any state change; nothing was ledgered: %w", err)
 	}
 	result.Self = self
+	if err := syncclient.CheckSelfDataEpoch(self, st.DataEpoch); err != nil {
+		result.Stopped = "device data epoch changed"
+		return result, err
+	}
 	if devicePaused(self) {
 		result.Stopped = "device paused"
 		return result, fmt.Errorf("%w: server reports collection paused for this device; nothing was ledgered and nothing was sent", syncclient.ErrDevicePaused)
@@ -255,6 +265,7 @@ func RunOverride(ctx context.Context, opt OverrideOptions) (OverrideResult, erro
 			ledger.Schema = overrides.Schema
 			ledger.DeviceID = st.DeviceID
 			ledger.ServerURL = serverURL
+			ledger.DataEpoch = st.DataEpoch
 			at := now().UTC()
 			for idx := range uploadSet {
 				id, err := newAttemptID()
@@ -414,7 +425,7 @@ func joinOverrideURL(base, path string) (string, error) {
 // with err.
 func uploadOverrideChunk(ctx context.Context, store statedir.Store, stateDir, serverURL string, client *http.Client, ledger *overrides.Ledger, ledgerStore overrides.Store, scope liveScope, st statedir.DeviceState, opt OverrideOptions, now func() time.Time, chunk []overrideDelta, result *OverrideResult, uploads *int) (bool, error) {
 	id := overrideBatchID(chunk)
-	file, err := writeChildBatch(stateDir, id, chunkRecords(chunk))
+	file, err := writeChildBatch(stateDir, id, chunkRecords(chunk), frozenDataEpoch(st.DataEpoch))
 	if err != nil {
 		result.Stopped = "override batch write failed"
 		return true, fmt.Errorf("override stopped; the pending attempts stay resumable: %w", err)

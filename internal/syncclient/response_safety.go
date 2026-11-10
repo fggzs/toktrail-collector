@@ -245,12 +245,13 @@ func deriveReceiptStatus(accepted, rejected int) string {
 
 // selfSnapshotReflectsSecret reports whether any string field of a
 // decoded 200 self snapshot that propagates downstream — the device ID,
-// the allowed-tools list, or any account source's instance ID, type, or
-// state — contains the device secret (case-insensitively; the secret is
-// hex, so an attacker cannot case-fold its way past the check). A
-// hostile server that echoes the credential it just received in the
-// Authorization header back into any of these fields must never see it
-// travel on into cursor hints, persisted state, or human output.
+// the usage-reset task's request id, the allowed-tools list, or any
+// account source's instance ID, type, or state — contains the device
+// secret (case-insensitively; the secret is hex, so an attacker cannot
+// case-fold its way past the check). A hostile server that echoes the
+// credential it just received in the Authorization header back into any
+// of these fields must never see it travel on into cursor hints,
+// persisted state, or human output.
 func selfSnapshotReflectsSecret(dev *SelfStatus, secret string) bool {
 	if secret == "" {
 		return false
@@ -260,6 +261,9 @@ func selfSnapshotReflectsSecret(dev *SelfStatus, secret string) bool {
 		return s != "" && strings.Contains(strings.ToLower(s), needle)
 	}
 	if reflects(dev.DeviceID) {
+		return true
+	}
+	if dev.UsageReset != nil && reflects(dev.UsageReset.RequestID) {
 		return true
 	}
 	for _, tool := range dev.AllowedTools {
