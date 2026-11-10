@@ -64,6 +64,32 @@ var (
 	// sending (uploads and tool-status reports) and keep pending batches
 	// queued; it is a state, not a failure, and never triggers re-binding.
 	ErrDevicePaused = errors.New("device_paused")
+	// ErrEpochStale maps the server's stable 409 device_epoch_stale code
+	// and every local data-epoch fence: the batch's durable dataEpoch or
+	// the server-reported device epoch does not match the locally locked
+	// epoch, so the data predates (or postdates) a device usage reset.
+	// Sending stops and the batch stays pending; the fence is final,
+	// never retried, and never reorganized (a scope reorganization
+	// cannot relabel old-epoch data into the current epoch). The local
+	// epoch only advances through an initial bind or an explicit
+	// force-recollect journal transition — never from a self snapshot —
+	// so a mismatch means the device needs the force-recollect flow, not
+	// a retry.
+	ErrEpochStale = errors.New("device_epoch_stale")
+	// ErrResetInProgress reports that the state directory carries a
+	// force-recollect journal that has not completed: ordinary
+	// entrypoints (periodic collection, connect, sync, and every
+	// syncclient send) stop before any recover, export or upload work,
+	// so a half-finished reset can never mix old and new epoch data.
+	// Only the recollect driver may continue, by naming the journal's
+	// exact request id in Options.AllowedResetRequestID.
+	ErrResetInProgress = errors.New("device_reset_in_progress")
+	// ErrResetConflict maps HTTP 409 answers on the device usage-reset
+	// endpoints: the expected data epoch or consent revision no longer
+	// matches the server's current state, or the same request id arrived
+	// with a different payload. It is final; the recollect driver must
+	// re-read the plan before retrying.
+	ErrResetConflict = errors.New("device_reset_conflict")
 	// ErrQuarantineHeld reports the recovery-only outcome that quarantined
 	// records exist but none is currently recoverable: the live consent
 	// scope still excludes them (or the revision is not strictly newer),
@@ -156,6 +182,17 @@ type Options struct {
 	Progress func(AttemptEvent)
 	// ReplaceExisting must be enabled only for an explicitly authorized repair.
 	ReplaceExisting bool
+	// AllowedResetRequestID optionally names the in-progress
+	// force-recollect journal request this run continues under. It is
+	// set ONLY by the recollect driver. The journal guard then passes
+	// when force-recollect.json exists, is not completed, and carries
+	// exactly this request id; a missing journal or a different request
+	// id fails closed. Ordinary callers leave it empty and are blocked
+	// by any non-completed journal. The data-epoch fences are NOT
+	// affected by this field: they always run, so even the recollect
+	// driver must upload batches stamped with the epoch its journal
+	// transition installed.
+	AllowedResetRequestID string
 }
 
 type Result struct {
@@ -178,6 +215,15 @@ type BatchRequest struct {
 	BatchID         string            `json:"batchId"`
 	Records         []json.RawMessage `json:"records"`
 	ReplaceExisting bool              `json:"replaceExisting,omitempty"`
+	// DataEpoch is the durable data epoch the batch was exported under,
+	// frozen in the payload exactly like the records. It is written by
+	// the export pipeline from the locked device state and carried
+	// verbatim through every reorganization (scope split, oversize
+	// split, quarantine recovery) — never refreshed from a self
+	// snapshot or the current state, so an old batch can never be
+	// relabeled with a newer epoch. nil means a legacy pre-epoch batch,
+	// tolerated only while the local device epoch is still 0.
+	DataEpoch *int64 `json:"dataEpoch,omitempty"`
 }
 
 type BatchReceipt struct {
@@ -239,6 +285,30 @@ type SelfStatus struct {
 	// designated executor of (the server only returns the executing
 	// device's sources). Absent/empty on servers without account sources.
 	AccountSources []protocol.Source `json:"accountSources,omitempty"`
+	// DataEpoch is the device's current data epoch as the server
+	// reports it. nil means an older server that predates the
+	// device-usage-reset feature (treated as epoch 0). The value is
+	// parsed for callers to compare — the collector NEVER advances the
+	// local state epoch from it: a mismatch is the blocked state that
+	// only the force-recollect flow resolves.
+	DataEpoch *int64 `json:"dataEpoch,omitempty"`
+	// UsageReset is the server's summary of this device's latest usage
+	// reset task, when one exists. Absent on servers without the
+	// feature or devices that were never reset.
+	UsageReset *DeviceUsageReset `json:"usageReset,omitempty"`
+}
+
+// DeviceUsageReset is the per-device usage-reset task summary the server
+// reports on device self (and device summaries). Status is the closed
+// vocabulary "recollecting" or "completed"; anything else is untrusted
+// free text callers must not branch on beyond displaying a held state.
+type DeviceUsageReset struct {
+	RequestID      string     `json:"requestId"`
+	DataEpoch      int64      `json:"dataEpoch"`
+	Status         string     `json:"status"`
+	ResetAt        time.Time  `json:"resetAt"`
+	CompletedAt    *time.Time `json:"completedAt,omitempty"`
+	ChangeSequence int64      `json:"changeSequence"`
 }
 
 type selfResponse struct {
@@ -250,6 +320,21 @@ type selfResponse struct {
 }
 
 func Run(ctx context.Context, store statedir.Store, opt Options) (Result, error) {
+	// Force-recollect journal guard, before ANY recovery or send work:
+	// while a reset is in flight, replaying a half-applied scope
+	// reorganization or sync ACK would mutate the very stores the
+	// recollect driver is archiving and swapping. Ordinary runs stop
+	// here; the recollect driver passes its journal's exact request id.
+	// The guard keys on opt.StateDir, falling back to the store's own
+	// directory so StateDir-less history retransmissions over a real
+	// state directory stay guarded too.
+	guardDir := strings.TrimSpace(opt.StateDir)
+	if guardDir == "" {
+		guardDir = store.Dir()
+	}
+	if err := GuardResetJournal(guardDir, opt.AllowedResetRequestID); err != nil {
+		return Result{}, err
+	}
 	if strings.TrimSpace(opt.StateDir) != "" {
 		// Replay any half-applied scope reorganization or quarantine
 		// recovery before anything else, so state is consistent before this
@@ -330,6 +415,16 @@ func Run(ctx context.Context, store statedir.Store, opt Options) (Result, error)
 		return Result{}, err
 	}
 	batch.ReplaceExisting = opt.ReplaceExisting
+	// Data-epoch fence, before the privacy gate, the oversize split and
+	// every attempt write: a batch whose durable payload epoch does not
+	// match the locally locked device epoch is pre-reset (or
+	// post-transition) data that must never leave the device, and it
+	// must not even be split — the split children inherit the same
+	// stale stamp and would just queue more refusals. The batch stays
+	// pending untouched.
+	if err := checkBatchDataEpoch(batch, st.DataEpoch); err != nil {
+		return Result{}, err
+	}
 	// Privacy gate before any state change or HTTP traffic: a batch with
 	// extra fields or malformed model identifiers must never leave the device, so
 	// the upload cannot rely on the server rejecting it. The check sits
@@ -463,6 +558,19 @@ func Run(ctx context.Context, store statedir.Store, opt Options) (Result, error)
 		// server's record-level scope enforcement remains the final defense
 		// for everything uploaded before the pause.
 		if err := checkNotPaused(selfStatus); err != nil {
+			return Result{Self: selfStatus}, err
+		}
+		// Data-epoch fence on the fresh preflight, every attempt: the
+		// server's epoch for this device must still match the locally
+		// locked epoch (a nil snapshot epoch counts as 0, the legacy
+		// steady state). This is the "stale local" stop: after a
+		// server-side usage reset the local epoch deliberately never
+		// auto-advances, so every ordinary upload stops until the
+		// force-recollect flow completes. It is final — never retried,
+		// never reorganized — and unaffected by AllowedResetRequestID:
+		// even the recollect driver must upload under the epoch its
+		// journal transition installed.
+		if err := CheckSelfDataEpoch(selfStatus, st.DataEpoch); err != nil {
 			return Result{Self: selfStatus}, err
 		}
 		if attemptNo == 1 {
@@ -1116,6 +1224,12 @@ func classifyIngestError(status int, code string) error {
 		return fmt.Errorf("%w: the server reported the consent scope changed (HTTP %d); the batch is reorganized under the live consent scope when it came from the outbox", ErrScopeChanged, status)
 	case "outside_scope":
 		return fmt.Errorf("%w: the server reported records outside the consent scope (HTTP %d); out-of-scope records are quarantined recoverably when the batch came from the outbox", ErrOutsideScope, status)
+	case "device_epoch_stale":
+		// A server-side epoch fence: the batch's durable dataEpoch does
+		// not match the server's current epoch for this device. Like the
+		// local fence, it is final and never reorganized — relabeling
+		// old-epoch data is exactly what the fence exists to prevent.
+		return fmt.Errorf("%w: the server rejected the batch because its data epoch does not match the device's current epoch (HTTP %d); the batch stays pending and the device needs a force-recollect if a usage reset happened", ErrEpochStale, status)
 	}
 	if code != "" {
 		return fmt.Errorf("sync failed: status %d (server error code: other)", status)

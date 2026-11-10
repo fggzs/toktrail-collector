@@ -78,6 +78,9 @@ type Record map[string]any
 type Batch struct {
 	BatchID string   `json:"batchId"`
 	Records []Record `json:"records"`
+	// DataEpoch is frozen when the batch is exported. It is never upgraded
+	// from a newer remote status during upload or archive replay.
+	DataEpoch *int64 `json:"dataEpoch,omitempty"`
 }
 
 type LineIssue struct {

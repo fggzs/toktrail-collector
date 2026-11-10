@@ -96,6 +96,15 @@ func reportToolStatusAttempt(ctx context.Context, store statedir.Store, opt Opti
 	if err := checkNotPaused(self); err != nil {
 		return Result{}, err
 	}
+	// Data-epoch fence: a device whose locally locked epoch no longer
+	// matches the server's (a usage reset happened elsewhere, or the
+	// local state predates it) reports no tool statuses either — the
+	// server cleared the ordinary tool status at the reset, and stale
+	// pre-reset reports would quietly repopulate it. The check is the
+	// same fence the upload preflight applies.
+	if err := CheckSelfDataEpoch(self, st.DataEpoch); err != nil {
+		return Result{}, err
+	}
 	if len(self.AllowedTools) > 0 {
 		for _, item := range opt.ToolStatuses {
 			allowed := false

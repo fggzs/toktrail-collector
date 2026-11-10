@@ -299,6 +299,8 @@ func stopReasonStatus(reason collection.StopReason) string {
 		return "cancelled"
 	case collection.StopFatalError:
 		return "failed"
+	case collection.StopEpochStale, collection.StopResetInProgress:
+		return "blocked"
 	default:
 		return "incomplete"
 	}
@@ -342,6 +344,13 @@ func StopReasonPhrase(reason collection.StopReason) string {
 		return "cancelled"
 	case collection.StopPartial:
 		return "incomplete: some authorized sources were not covered on this device"
+	case collection.StopEpochStale:
+		// Terminal fence: only the force-recollect flow resolves it, so
+		// the phrase names the action without suggesting a retry or a
+		// re-bind (the collector never re-binds automatically).
+		return "blocked: the device's data epoch no longer matches the server (a usage reset happened); run the force-recollect flow before collecting again"
+	case collection.StopResetInProgress:
+		return "blocked: a force-recollect is in progress; finish or resume it before collecting again"
 	default:
 		return "ended with an unclassified outcome"
 	}
