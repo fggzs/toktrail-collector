@@ -295,6 +295,23 @@ func TestLoadRecordsQuarantinesRequestsWithoutTimestamp(t *testing.T) {
 	}
 }
 
+func TestLoadRecordsTreatsMissingCacheSplitAsUncached(t *testing.T) {
+	root := t.TempDir()
+	conversationFixture(t, root, "p1", "c1", `{"requests":[{"id":"r1","state":"complete","startedAt":1791014053528,"usage":{"inputTokens":100,"outputTokens":10,"totalTokens":110}}]}`)
+
+	result, err := LoadRecords(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Records) != 1 || result.Quarantined != 0 {
+		t.Fatalf("legacy usage must export without quarantine: %#v", result)
+	}
+	record := result.Records[0]
+	if record["input"] != "100" || record["cacheRead"] != "0" || record["cacheWrite"] != "0" || record["output"] != "10" {
+		t.Fatalf("legacy usage must be fully uncached: %#v", record)
+	}
+}
+
 func TestLoadRecordsQuarantinesContradictoryUsage(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -325,8 +342,8 @@ func TestLoadRecordsQuarantinesContradictoryUsage(t *testing.T) {
 			index: `{"requests":[{"id":"r1","state":"complete","startedAt":1791014053528,"usage":{"inputTokens":100,"cacheTokens":0}}]}`,
 		},
 		{
-			name:  "missing cache split",
-			index: `{"requests":[{"id":"r1","state":"complete","startedAt":1791014053528,"usage":{"inputTokens":100,"outputTokens":10,"totalTokens":110}}]}`,
+			name:  "partial cache split with recorded miss",
+			index: `{"requests":[{"id":"r1","state":"complete","startedAt":1791014053528,"usage":{"inputTokens":100,"outputTokens":10,"totalTokens":110,"cachedMissTokens":20}}]}`,
 		},
 		{
 			name:  "missing cache write counter",

@@ -33,10 +33,9 @@
 //     cachedMissTokens is read as "not reported", never as "the whole prompt is
 //     uncached"; no recorded row reports cache reads with a zero miss count.
 //   - totalTokens is inputTokens + outputTokens when present.
-//   - A row that records the prompt but omits cacheTokens or
-//     cachedWriteTokens only proves the total prompt: it does not prove those
-//     shares were zero, so the request is quarantined instead of exported
-//     with an invented split.
+//   - Legacy rows with no cache split fields are treated as entirely
+//     uncached (cacheRead=0, cacheWrite=0). Partially recorded splits are
+//     quarantined rather than discarding a cache share that was recorded.
 //
 // The record uploads the uncached prompt as "input", the cached share as
 // "cacheRead" and the cache-write share as "cacheWrite" (the same
@@ -522,15 +521,17 @@ func normalizeUsage(u *requestUsage) (usageCounts, string) {
 	if !ok {
 		return counts, "invalid cachedWriteTokens"
 	}
-	if !cachePresent || !writePresent {
-		// A row that records the prompt but omits the split only proves
-		// totalTokens worth of prompt: exporting cacheRead=0/cacheWrite=0
-		// would invent a breakdown nobody recorded.
-		return counts, "completed request without a recorded cache split"
-	}
 	cacheMiss, missPresent, ok := countValue(u.CachedMissTokens)
 	if !ok {
 		return counts, "invalid cachedMissTokens"
+	}
+	if !cachePresent && !writePresent && !missPresent {
+		// Older clients recorded the total prompt without a cache breakdown.
+		// Count the whole prompt as uncached, as with an all-zero split.
+		cacheRead, cacheWrite = 0, 0
+	} else if !cachePresent || !writePresent {
+		// A partial split must not discard cache usage that was recorded.
+		return counts, "completed request without a recorded cache split"
 	}
 	// The recorded split is three-way: inputTokens is the cache-read share plus
 	// the cache-write share plus the uncached share. Verified against real
