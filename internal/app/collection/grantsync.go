@@ -147,6 +147,18 @@ func syncGrants(ctx context.Context, opt Options, stateDir string, grantStore gr
 			return info, managedconsent.Policy{}, nil
 		}
 
+		// Data-epoch fence, BEFORE any grant write, scan or export: a
+		// server whose epoch for this device no longer matches the
+		// locally locked epoch means a usage reset happened that this
+		// device has not been force-recollected through. The round stops
+		// here so no source is read (baselines must not advance under
+		// the old epoch), no batch is exported, and no server-derived
+		// grant view is applied until the reset flow completes. The
+		// local epoch is never advanced from this snapshot.
+		if err := synccmd.CheckSelfDataEpoch(self, st.DataEpoch); err != nil {
+			return info, managedconsent.Policy{}, err
+		}
+
 		if self.GrantProtocolVersion == nil {
 			_, seen, lerr := mcStore.Load()
 			if lerr != nil {

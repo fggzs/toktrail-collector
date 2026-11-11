@@ -156,6 +156,18 @@ const (
 	// never claims a failure; the explicit partial modes keep their
 	// historical exit-zero contract.
 	StopPartial StopReason = "partial"
+	// StopEpochStale: the device's locally locked data epoch no longer
+	// matches the server's (syncclient.ErrEpochStale — a usage reset
+	// happened that this device has not been force-recollected
+	// through). Terminal by design: nothing is read, exported or
+	// uploaded, the collector never re-binds or auto-advances the local
+	// epoch, and only the force-recollect flow resolves it.
+	StopEpochStale StopReason = "epoch_stale"
+	// StopResetInProgress: an unfinished force-recollect journal blocks
+	// ordinary collection (syncclient.ErrResetInProgress). Terminal for
+	// this run: the reset must finish (or be resumed through its own
+	// entrypoint) before periodic collection, connect or sync proceed.
+	StopResetInProgress StopReason = "reset_in_progress"
 )
 
 // Summary-only drain stop codes: derived by SummarizePhases, never
@@ -562,6 +574,16 @@ func ClassifyRunError(err, ctxErr error) (StopReason, bool) {
 	switch {
 	case errors.Is(err, runlock.ErrBusy):
 		return StopBusy, true
+	case errors.Is(err, synccmd.ErrEpochStale):
+		// Terminal data-epoch fence: a usage reset happened that this
+		// device has not been force-recollected through. Never retried,
+		// never auto-rebound — the stable log names the state so an
+		// operator knows to run the force-recollect flow.
+		return StopEpochStale, true
+	case errors.Is(err, synccmd.ErrResetInProgress):
+		// Terminal for this run: an unfinished force-recollect journal
+		// owns the state directory.
+		return StopResetInProgress, true
 	case errors.Is(err, syncbudget.ErrTotalExhausted),
 		errors.Is(err, syncbudget.ErrDeadlineExceeded):
 		return StopBudgetExhausted, true

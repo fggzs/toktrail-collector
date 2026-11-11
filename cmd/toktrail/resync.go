@@ -32,6 +32,8 @@ flags:
   --dry-run            offline read-only plan; remote scope is not verified
   --yes                confirm retransmission without an interactive prompt
   --replace-existing   override mode: scan the CURRENT Codex and DeepSeek Harness sources and replace same-key server records with the current scanned record (explicit confirmation required)
+  --force-recollect    clear this device's ordinary history and rebuild ALL authorized local tools from current source data; Cursor is excluded (explicit confirmation required)
+  --expected-device    refuse to run unless this is the intended bound device ID
   --state-dir string   local TokTrail state directory (also TOKTRAIL_HOME)
   --server string      server base URL; defaults to the bound server (also TOKTRAIL_SERVER_URL)
   --max-batches int    upload budget; 0 processes the entire frozen plan
@@ -71,6 +73,8 @@ func runResyncWithIO(args []string, input io.Reader, output io.Writer) error {
 	dryRun := fs.Bool("dry-run", false, "offline read-only plan; remote scope is not verified")
 	yes := fs.Bool("yes", false, "confirm retransmission without an interactive prompt")
 	replaceExisting := fs.Bool("replace-existing", false, "override mode: scan the CURRENT Codex and DeepSeek Harness sources and replace same-key server records with the current scanned record (explicit confirmation required)")
+	forceRecollect := fs.Bool("force-recollect", false, "clear ordinary device history and recollect all authorized local tools; Cursor excluded")
+	expectedDevice := fs.String("expected-device", "", "guard against clearing the wrong bound device")
 	stateDir := fs.String("state-dir", env("TOKTRAIL_HOME", ""), "local TokTrail state directory")
 	serverURL := fs.String("server", env("TOKTRAIL_SERVER_URL", ""), "server base URL; defaults to bound server")
 	maxBatches := fs.Int("max-batches", 0, "upload budget; 0 processes the entire frozen plan")
@@ -120,6 +124,12 @@ func runResyncWithIO(args []string, input io.Reader, output io.Writer) error {
 	if fs.NArg() != 0 {
 		return known(errors.New("resync accepts flags only, no positional arguments"))
 	}
+	if *forceRecollect && *replaceExisting {
+		return known(errors.New("--force-recollect and --replace-existing cannot be combined"))
+	}
+	if *expectedDevice != "" && !*forceRecollect {
+		return known(errors.New("--expected-device requires --force-recollect"))
+	}
 	if *maxBatches < 0 {
 		return known(errors.New("--max-batches must be zero or a positive integer"))
 	}
@@ -133,6 +143,9 @@ func runResyncWithIO(args []string, input io.Reader, output io.Writer) error {
 		if err != nil {
 			return unknown(err)
 		}
+	}
+	if *forceRecollect {
+		return runForceRecollectWithIO(dir, *serverURL, *expectedDevice, *dryRun, *yes, *maxBatches, *verbose, input, out)
 	}
 	if !*dryRun {
 		lock, err := runlock.Acquire(dir)

@@ -133,6 +133,15 @@ func Run(ctx context.Context, opt Options) (Result, error) {
 	if opt.MaxTotalBatches < 0 {
 		return Result{BindStatus: BindNotAttempted}, errors.New("max total batches must be non-negative")
 	}
+	// Force-recollect journal guard, before the bind, the scheduler
+	// install and every collection or upload phase: while a reset is in
+	// flight, connect must not re-bind the device, install schedules or
+	// read/export/upload anything under the old epoch. Connect offers no
+	// bypass; the recollect driver calls syncclient directly under its
+	// journal's request id.
+	if err := syncclient.CheckResetJournal(stateDir); err != nil {
+		return Result{BindStatus: BindNotAttempted}, err
+	}
 
 	// The run-wide shared POST budget. Every real ingest POST of this
 	// run — the device outbox drain, the account-source uploads (the

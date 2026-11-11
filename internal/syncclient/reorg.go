@@ -201,6 +201,15 @@ type reorgBatchPlan struct {
 	Source  string            `json:"source,omitempty"`
 	Input   string            `json:"input,omitempty"`
 	Records []json.RawMessage `json:"records"`
+	// DataEpoch is the parent batch's durable payload epoch, carried
+	// verbatim. It is copied from the batch being reorganized (scope
+	// split, oversize split) or restored from a quarantined record's
+	// origin batch (recovery) — NEVER taken from a self snapshot or the
+	// current device state, so a reorganization can never relabel
+	// old-epoch data into the current epoch. nil stays nil: a legacy
+	// pre-epoch batch reorganizes into legacy children, which the upload
+	// fence still refuses once the local epoch has moved.
+	DataEpoch *int64 `json:"dataEpoch,omitempty"`
 }
 
 // reorgRecoveryItem re-pends one quarantined message interval under its
@@ -447,10 +456,12 @@ func applyReorgJournal(stateDir string, journal reorgJournal) error {
 }
 
 // writeReorgBatchFile writes one new batch file atomically. Records are
-// copied verbatim; the only new content is the wrapper and batch ID. An
+// copied verbatim; the only new content is the wrapper and batch ID —
+// plus the parent's durable data epoch stamp, carried unchanged so a
+// reorganized child can never be relabeled into a different epoch. An
 // existing identical file is a replay no-op; a conflicting file is fatal.
 func writeReorgBatchFile(stateDir string, plan reorgBatchPlan) error {
-	payload, err := json.Marshal(BatchRequest{BatchID: plan.BatchID, Records: plan.Records})
+	payload, err := json.Marshal(BatchRequest{BatchID: plan.BatchID, Records: plan.Records, DataEpoch: plan.DataEpoch})
 	if err != nil {
 		return err
 	}
@@ -598,10 +609,11 @@ func splitBatchUnderScope(stateDir string, entry outbox.BatchEntry, batch BatchR
 	}
 	if len(keep) > 0 {
 		journal.NewBatches = []reorgBatchPlan{{
-			BatchID: reorgBatchID(batch.BatchID, scope.revision, scope, keepKeys),
-			Source:  entry.Source,
-			Input:   entry.Input,
-			Records: keep,
+			BatchID:   reorgBatchID(batch.BatchID, scope.revision, scope, keepKeys),
+			Source:    entry.Source,
+			Input:     entry.Input,
+			Records:   keep,
+			DataEpoch: batch.DataEpoch,
 		}}
 	}
 	if err := commitReorgJournal(stateDir, journal); err != nil {
@@ -752,6 +764,18 @@ func recoverQuarantinedWithScope(stateDir string, self SelfStatus) (int, error) 
 	recovered := 0
 	for _, group := range groups {
 		entries := byGroup[group]
+		// Data-epoch provenance: every record in this group must carry
+		// the same origin epoch — read from the immutable origin batch
+		// file each entry references, never from the live device state
+		// or a self snapshot, so recovery cannot relabel pre-reset data
+		// into the current epoch. A pre-epoch legacy origin (or one that
+		// cannot be located) contributes no stamp; a DISAGREEMENT between
+		// two known epochs fails closed and leaves everything
+		// quarantined.
+		groupEpoch, err := recoveryGroupDataEpoch(stateDir, outbox.New(stateDir), entries)
+		if err != nil {
+			return 0, err
+		}
 		for start := 0; start < len(entries); start += maxRecordsPerBatch {
 			chunk := entries[start:min(start+maxRecordsPerBatch, len(entries))]
 			keys := make([]string, 0, len(chunk))
@@ -762,10 +786,11 @@ func recoverQuarantinedWithScope(stateDir string, self SelfStatus) (int, error) 
 			}
 			batchID := recoveryBatchID(group.source, scope.revision, keys)
 			journal.NewBatches = append(journal.NewBatches, reorgBatchPlan{
-				BatchID: batchID,
-				Source:  group.source,
-				Input:   group.input,
-				Records: records,
+				BatchID:   batchID,
+				Source:    group.source,
+				Input:     group.input,
+				Records:   records,
+				DataEpoch: groupEpoch,
 			})
 			for _, entry := range chunk {
 				// Every recovered record leaves the quarantine store, not
@@ -853,6 +878,79 @@ func grantIdentity(source, input string) string {
 	return strings.TrimSpace(source) + "\x00" + filepath.Clean(strings.TrimSpace(input))
 }
 
+// recoveryGroupDataEpoch determines the durable data epoch stamp for one
+// quarantine-recovery group: each entry's origin batch (located through
+// the outbox ledger, which never prunes, or the canonical batches
+// directory) is read for the epoch the record was exported under. A
+// pre-epoch legacy file with no stamp counts as 0, and an origin that
+// cannot be located at all yields no stamp — the recovered batch then
+// carries none, which the upload fence refuses once the local epoch has
+// moved, so records are never lost and never smuggled past the fence.
+//
+// The one hard failure is DISAGREEMENT: two different known origin
+// epochs inside one group stop the whole recovery with an error and
+// leave every record quarantined — recovery must never pick a side,
+// because a wrong stamp would either strand the records or relabel
+// pre-reset data into the current epoch. The stamp is never taken from
+// the live device state or a self snapshot.
+func recoveryGroupDataEpoch(stateDir string, ledger outbox.Store, entries []quarantine.Entry) (*int64, error) {
+	var stamp *int64
+	for _, entry := range entries {
+		epoch := originDataEpoch(stateDir, ledger, entry.OriginBatchID)
+		if epoch == nil {
+			// Legacy or unlocatable origin: no stamp.
+			continue
+		}
+		if stamp == nil {
+			e := *epoch
+			stamp = &e
+			continue
+		}
+		if *stamp != *epoch {
+			return nil, fmt.Errorf("quarantined records of source %s carry different origin data epochs (%d and %d); failing closed and leaving everything quarantined", entry.Source, *stamp, *epoch)
+		}
+	}
+	return stamp, nil
+}
+
+// originDataEpoch reads the durable data epoch stamp of the batch file a
+// quarantined record was exported under. The origin file is resolved
+// through the outbox ledger first — an entry keeps its File wherever the
+// batch lives, and terminal (reorganized/synced) entries are never
+// pruned — then through the canonical batches directory (reorganization
+// children). An origin that is missing, undecodable, unstamped, or
+// carries a negative epoch yields nil: unknown, never a guess.
+func originDataEpoch(stateDir string, ledger outbox.Store, originBatchID string) *int64 {
+	if strings.TrimSpace(originBatchID) == "" {
+		return nil
+	}
+	path := ""
+	if out, err := ledger.Load(); err == nil {
+		for _, entry := range out.Batches {
+			if entry.BatchID == originBatchID {
+				path = strings.TrimSpace(entry.File)
+				break
+			}
+		}
+	}
+	if path == "" {
+		path = batchFilePath(stateDir, originBatchID)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var batch BatchRequest
+	if err := json.Unmarshal(b, &batch); err != nil {
+		return nil
+	}
+	if batch.DataEpoch == nil || *batch.DataEpoch < 0 {
+		return nil
+	}
+	epoch := *batch.DataEpoch
+	return &epoch
+}
+
 // recoverQuarantinedWithFreshSelf is the recovery-only path used when the
 // outbox is empty but quarantined records exist. It performs exactly one
 // self GET, preceded by durable attempt accounting; if that accounting
@@ -864,6 +962,15 @@ func recoverQuarantinedWithFreshSelf(ctx context.Context, client *http.Client, s
 	}
 	self, err := preflightSelf(ctx, client, serverURL, st)
 	if err != nil {
+		return SelfStatus{}, 0, err
+	}
+	// Data-epoch fence on the recovery preflight: recovering quarantined
+	// records into new pending batches is pointless (and dangerous) once
+	// the server's epoch for this device has moved — the recovery batch
+	// keeps the quarantined records' origin epoch and would only be
+	// refused at the next upload. Stop with the same stale-local fence
+	// every ordinary send uses.
+	if err := CheckSelfDataEpoch(self, st.DataEpoch); err != nil {
 		return SelfStatus{}, 0, err
 	}
 	recovered, err := recoverQuarantinedWithScope(stateDir, self)
@@ -978,10 +1085,11 @@ func reorganizeOversizedBatch(stateDir string, entry outbox.BatchEntry, batch Ba
 			return reorgJournal{}, fmt.Errorf("child batch %s envelope exceeds %d bytes; failing closed", childID, MaxBatchPayloadBytes)
 		}
 		plans[i] = reorgBatchPlan{
-			BatchID: childID,
-			Source:  entry.Source,
-			Input:   entry.Input,
-			Records: chunk,
+			BatchID:   childID,
+			Source:    entry.Source,
+			Input:     entry.Input,
+			Records:   chunk,
+			DataEpoch: batch.DataEpoch,
 		}
 	}
 

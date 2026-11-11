@@ -248,6 +248,9 @@ func runScan(args []string) error {
 	defer stateLock.Close()
 	// Finish any pending export transaction first so interval baselines
 	// are consistent before the claude-code-jsonl progress state is read.
+	if err := synccmd.CheckResetJournal(dir); err != nil {
+		return err
+	}
 	if _, err := exportcommit.Recover(dir); err != nil {
 		return err
 	}
@@ -302,6 +305,9 @@ func runPreview(args []string) error {
 		return err
 	}
 	defer stateLock.Close()
+	if err := synccmd.CheckResetJournal(dir); err != nil {
+		return err
+	}
 	if _, err := exportcommit.Recover(dir); err != nil {
 		return err
 	}
@@ -343,6 +349,9 @@ func runExport(args []string) error {
 		return err
 	}
 	defer stateLock.Close()
+	if err := synccmd.CheckResetJournal(dir); err != nil {
+		return err
+	}
 	prepared, err := pipeline.PrepareExport(adapter.Options{Source: *source, Input: *input, Output: *output, BatchID: *batchID, StateDir: dir})
 	if err != nil {
 		return err
@@ -2526,6 +2535,11 @@ export [--source usage-json|codex-jsonl|claude-code-jsonl|deepseek-harness|workb
                               consent revision; revoked/deleted devices stop sending
 
   resync --all [--dry-run] [--yes] [--max-batches N] [--verbose]
+  resync --all --force-recollect [--expected-device ID] [--dry-run] [--yes]
+                               clear ordinary device history, keep device identity,
+                               and rebuild ALL authorized local tools; Cursor is
+                               excluded. Force dry-run reads the remote plan and
+                               local sources but never resets or uploads.
                               retransmit archived synced batches to the bound device;
                               dry-run is offline and read-only; execution confirms
                               live authorization and preserves collection progress;

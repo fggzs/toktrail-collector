@@ -96,6 +96,8 @@ docs/                   架构、发布与调度设计说明
 - `toktrail sync` 上传指定 batch 或最旧的 pending outbox batch。
 - `toktrail resync --all --dry-run` 离线预览已同步设备归档中符合本地授权的批次，不联网、不修改状态；预览仅涵盖归档，不扫描来源或隔离区，也不验证远端授权。
 - `toktrail resync --all` 确认后扫描已授权来源、恢复本次范围内的隔离记录、上传待同步批次并重传历史归档；已启用 Cursor 时也会同步当前授权的完整时间范围。`--yes` 跳过交互，`--max-batches N` 限制本次归档重传批次；未完成的工作会明确提示，可再次执行续传。
+- `toktrail resync --all --force-recollect --dry-run` 读取服务端当前设备授权与重置计划，使用空基线预扫全部已启用、已授权本地来源。它与普通 resync 的离线 dry-run 不同：会进行只读网络请求和临时隔离扫描，但不会清空或上传。
+- `toktrail resync --all --force-recollect` 经明确确认后清空本设备之前的普通工具采集历史，并按当前授权从原始来源重新采集。保留设备身份、凭据及 Cursor 账号状态；授权范围外或原始日志已不存在的旧历史不会恢复。先核对计划再确认；可用 `--expected-device ID` 防止在错误设备执行，`--max-batches N` 限制本次上传数量。中断后执行同一命令续传，同一任务不会再次清空服务端。需要服务端与网站支持 `device-usage-reset`；旧客户端和旧状态备份不能把旧代次错误批次回灌。命令成功表示服务端重采完成，网站投影随后异步更新。若记录被服务端拒绝，已结算的拒绝批次不能靠反复续传纠正：先修复原因，再仅移除当前状态目录下 `force-recollect.json` 放弃未完成任务，重新明确确认一次强制重采；保留已安装的新代次状态及隔离归档，绝不恢复旧批次。
 - 本次有效授权决定上传范围；范围收窄不会删除服务器已有历史，撤销和删除由 leaderboard 负责。缺失的源数据或归档无法可靠重建；跨设备去重不受保证，重新安装时应保留本地状态目录。
 - `toktrail sources` 管理计划采集的显式本地读取授权。
 - `toktrail periodic` 从已启用 grants 采集，并有限度 drain pending batches。
@@ -124,6 +126,8 @@ go run ./cmd/toktrail help
 go run ./cmd/toktrail scan --source codex-jsonl --input ~/.codex/sessions
 go run ./cmd/toktrail export --source codex-jsonl --input ~/.codex/sessions --out ./codex-batch.json --batch codex-demo-1
 ```
+
+Codex 使用统一的流式 JSONL 字段投影：大型正文、图片和工具输出只流式验证，不完整载入内存，不再受共享读取器的 16 MiB 单行限制。模型、时间与用量校验，以及原物理行号和去重键保持不变；损坏日志仍明确报错，不会静默跳过。无需设置行大小参数。
 
 扫描并导出 Claude Code 使用数据：
 

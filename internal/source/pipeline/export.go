@@ -12,6 +12,7 @@ import (
 	"time"
 	"toktrail-collector/internal/local/progress"
 	"toktrail-collector/internal/local/scanledger"
+	"toktrail-collector/internal/local/statedir"
 	"toktrail-collector/internal/source/adapter"
 )
 
@@ -146,7 +147,21 @@ func (p *Pipeline) PrepareFromLoaded(opt adapter.Options, loaded adapter.LoadRes
 			}
 		}
 	}
-	payload, err := json.MarshalIndent(adapter.Batch{BatchID: batchID, Records: valid}, "", "  ")
+	var epoch *int64
+	if opt.StateDir != "" {
+		state, loadErr := statedir.New(opt.StateDir).Load()
+		if loadErr != nil {
+			return PreparedExport{}, fmt.Errorf("read export data epoch: %w", loadErr)
+		}
+		if state.DataEpoch < 0 {
+			return PreparedExport{}, errors.New("invalid export data epoch")
+		}
+		if state.DataEpoch > 0 {
+			value := state.DataEpoch
+			epoch = &value
+		}
+	}
+	payload, err := json.MarshalIndent(adapter.Batch{BatchID: batchID, Records: valid, DataEpoch: epoch}, "", "  ")
 	if err != nil {
 		return PreparedExport{}, err
 	}
@@ -191,13 +206,17 @@ func (p *Pipeline) SplitPreparedExport(prepared PreparedExport) ([]PreparedExpor
 	}
 
 	// Check if already within limits as a single batch
-	compactBatch, err := json.Marshal(adapter.Batch{BatchID: prepared.BatchID, Records: batch.Records})
+	compactBatch, err := json.Marshal(adapter.Batch{BatchID: prepared.BatchID, Records: batch.Records, DataEpoch: batch.DataEpoch})
 	if err == nil && len(batch.Records) <= MaxBatchRecords && len(compactBatch) <= MaxBatchPayloadBytes {
 		return []PreparedExport{prepared}, nil
 	}
 
 	// Partition records into chunks
-	dummyOverhead := len(`{"batchId":"` + prepared.BatchID + `-part-0001","records":[]}`)
+	envelope, err := json.Marshal(adapter.Batch{BatchID: prepared.BatchID + "-part-0001", Records: []adapter.Record{}, DataEpoch: batch.DataEpoch})
+	if err != nil {
+		return nil, fmt.Errorf("marshal split envelope: %w", err)
+	}
+	dummyOverhead := len(envelope)
 	var chunks [][]adapter.Record
 	var chunkKeysList [][]string
 
@@ -249,7 +268,7 @@ func (p *Pipeline) SplitPreparedExport(prepared PreparedExport) ([]PreparedExpor
 		childOutput := filepath.Join(outDir, childID+".json")
 
 		// Verify compact payload limit
-		compact, err := json.Marshal(adapter.Batch{BatchID: childID, Records: chunk})
+		compact, err := json.Marshal(adapter.Batch{BatchID: childID, Records: chunk, DataEpoch: batch.DataEpoch})
 		if err != nil {
 			return nil, fmt.Errorf("marshal child batch %s: %w", childID, err)
 		}
@@ -257,7 +276,7 @@ func (p *Pipeline) SplitPreparedExport(prepared PreparedExport) ([]PreparedExpor
 			return nil, fmt.Errorf("child batch %s exceeds %d bytes; failing closed", childID, MaxBatchPayloadBytes)
 		}
 
-		payload, err := json.MarshalIndent(adapter.Batch{BatchID: childID, Records: chunk}, "", "  ")
+		payload, err := json.MarshalIndent(adapter.Batch{BatchID: childID, Records: chunk, DataEpoch: batch.DataEpoch}, "", "  ")
 		if err != nil {
 			return nil, fmt.Errorf("indent child batch %s: %w", childID, err)
 		}

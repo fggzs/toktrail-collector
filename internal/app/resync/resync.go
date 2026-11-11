@@ -382,6 +382,9 @@ func Run(ctx context.Context, opt Options) (Result, error) {
 	if stateDir == "" {
 		return Result{}, errors.New("resync requires a state directory")
 	}
+	if err := syncclient.CheckResetJournal(stateDir); err != nil {
+		return Result{}, err
+	}
 	now := opt.Now
 	if now == nil {
 		now = time.Now
@@ -601,6 +604,10 @@ func Run(ctx context.Context, opt Options) (Result, error) {
 		return result, fmt.Errorf("resync stopped before any upload; the job stays resumable: %w", err)
 	}
 	result.Self = self
+	if err := syncclient.CheckSelfDataEpoch(self, st.DataEpoch); err != nil {
+		result.Stopped = "device data epoch changed"
+		return result, err
+	}
 	if devicePaused(self) {
 		result.Stopped = "device paused"
 		return result, fmt.Errorf("%w: server reports collection paused for this device; the resync job stays resumable and nothing was sent", syncclient.ErrDevicePaused)
@@ -990,7 +997,7 @@ func Run(ctx context.Context, opt Options) (Result, error) {
 				result.Stopped = fmt.Sprintf("upload budget reached (%d upload(s) this run); re-run toktrail resync --all to continue", opt.MaxBatches)
 				break
 			}
-			file, werr := writeChildBatch(stateDir, id, chunkRecords(chunk))
+			file, werr := writeChildBatch(stateDir, id, chunkRecords(chunk), frozenDataEpoch(st.DataEpoch))
 			if werr != nil {
 				result.Stopped = "override batch write failed"
 				return result, fmt.Errorf("resync stopped before the override-ledger retransmission; the job stays resumable: %w", werr)
@@ -1688,7 +1695,7 @@ func deriveUploads(stateDir string, parent jobBatch, batch syncclient.BatchReque
 	// Partition into chunks of <= MaxBatchRecords records and <=
 	// MaxBatchPayloadBytes compact envelope, mirroring the syncclient
 	// oversize split.
-	const dummyOverhead = len(`{"batchId":"resync-0123456789abcdef","records":[]}`)
+	dummyOverhead := envelopeSize(syncclient.BatchRequest{BatchID: "resync-0123456789abcdef", Records: []json.RawMessage{}, DataEpoch: batch.DataEpoch})
 	var chunks [][]json.RawMessage
 	var chunkKeys [][]string
 	var current []json.RawMessage
@@ -1731,7 +1738,7 @@ func deriveUploads(stateDir string, parent jobBatch, batch syncclient.BatchReque
 		} else {
 			id = resyncChildBatchID(parent.BatchID, scope.revision, scope, chunkKeys[idx])
 		}
-		file, err := writeChildBatch(stateDir, id, chunk)
+		file, err := writeChildBatch(stateDir, id, chunk, batch.DataEpoch)
 		if err != nil {
 			return nil, err
 		}
@@ -1821,8 +1828,12 @@ func resyncChildBatchID(parentBatchID string, revision int64, scope liveScope, r
 // writeChildBatch atomically writes one derived child batch under the
 // resync-owned directory. Records are copied verbatim; an existing
 // identical file is a replay no-op, a conflicting file is fatal.
-func writeChildBatch(stateDir, id string, records []json.RawMessage) (string, error) {
-	payload, err := json.Marshal(syncclient.BatchRequest{BatchID: id, Records: records})
+func writeChildBatch(stateDir, id string, records []json.RawMessage, epochs ...*int64) (string, error) {
+	var epoch *int64
+	if len(epochs) > 0 {
+		epoch = epochs[0]
+	}
+	payload, err := json.Marshal(syncclient.BatchRequest{BatchID: id, Records: records, DataEpoch: epoch})
 	if err != nil {
 		return "", err
 	}

@@ -453,6 +453,16 @@ func RunLocked(ctx context.Context, opt Options, lock *runlock.Lock) (Result, er
 // call (Run via Acquire/defer Close; RunLocked's caller by contract).
 func runLocked(ctx context.Context, opt Options, lock *runlock.Lock) (Result, error) {
 	stateDir := strings.TrimSpace(opt.StateDir)
+	// Force-recollect journal guard, before ANY recovery, grant sync,
+	// scan or export: while a reset is in flight, ordinary collection
+	// must neither read sources (it would advance baselines under the
+	// old epoch) nor export batches (they would be stamped with the old
+	// epoch and strand the outbox). Periodic collection offers no
+	// bypass; only the recollect driver's own syncclient calls continue,
+	// under its journal's request id.
+	if err := synccmd.CheckResetJournal(stateDir); err != nil {
+		return Result{DrainStop: DrainStopNotRun}, err
+	}
 	// DrainStop starts as not-run: every exit before the drain phase
 	// (an authorization pause, a grant-sync or scan failure, an early
 	// error) keeps the honest not-run code; the drain entry below
@@ -1145,6 +1155,14 @@ func DrainPendingLocked(ctx context.Context, opt Options, lock *runlock.Lock) (R
 	}
 	if err := lock.Validate(stateDir); err != nil {
 		return Result{}, fmt.Errorf("drain-only run requires the caller's state lock: %w", err)
+	}
+	// Force-recollect journal guard, before the export-transaction
+	// recovery, the grant refresh and any upload: a drain during a reset
+	// would upload old-epoch batches (the syncclient fence refuses them,
+	// but the run should stop before doing the work at all) and could
+	// refresh grants against a state the reset is about to swap.
+	if err := synccmd.CheckResetJournal(stateDir); err != nil {
+		return Result{DrainStop: DrainStopNotRun}, err
 	}
 	if err := ctx.Err(); err != nil {
 		return Result{}, err

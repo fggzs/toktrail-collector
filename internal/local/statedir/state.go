@@ -12,15 +12,27 @@ import (
 const stateFileName = "device.json"
 
 type DeviceState struct {
-	ServerURL                 string     `json:"serverUrl,omitempty"`
-	ApplicationID             string     `json:"applicationId,omitempty"`
-	ExternalSubjectID         string     `json:"externalSubjectId,omitempty"`
-	DeviceID                  string     `json:"deviceId,omitempty"`
-	DeviceName                string     `json:"deviceName,omitempty"`
-	Platform                  string     `json:"platform,omitempty"`
-	DeviceSecret              string     `json:"deviceSecret,omitempty"`
-	BindRequestID             string     `json:"bindRequestId,omitempty"`
-	ConsentRevision           int64      `json:"consentRevision,omitempty"`
+	ServerURL         string `json:"serverUrl,omitempty"`
+	ApplicationID     string `json:"applicationId,omitempty"`
+	ExternalSubjectID string `json:"externalSubjectId,omitempty"`
+	DeviceID          string `json:"deviceId,omitempty"`
+	DeviceName        string `json:"deviceName,omitempty"`
+	Platform          string `json:"platform,omitempty"`
+	DeviceSecret      string `json:"deviceSecret,omitempty"`
+	BindRequestID     string `json:"bindRequestId,omitempty"`
+	ConsentRevision   int64  `json:"consentRevision,omitempty"`
+	// DataEpoch is the device's durable data epoch: the fence against
+	// pre-reset data flowing back into a device the server has usage-reset.
+	// It is written ONLY by an initial bind (a state that had no device
+	// bound yet adopts the receipt's epoch, 0 for both old servers and
+	// fresh devices) and by an explicit force-recollect journal
+	// transition performed by the recollect driver. It is NEVER advanced
+	// from a device self snapshot or a re-bind: a server that moved on
+	// leaves the local epoch stale on purpose, so the sync epoch fences
+	// block every ordinary upload until the reset flow completes. 0 means
+	// legacy/initial (the epoch fence then tolerates batches without a
+	// dataEpoch stamp).
+	DataEpoch                 int64      `json:"dataEpoch,omitempty"`
 	BoundAt                   time.Time  `json:"boundAt,omitempty"`
 	UploadAuthorized          bool       `json:"uploadAuthorized"`
 	PublicAuthorized          bool       `json:"publicAuthorized"`
@@ -43,6 +55,12 @@ type DeviceState struct {
 type Store struct{ dir string }
 
 func New(dir string) Store { return Store{dir: strings.TrimSpace(dir)} }
+
+// Dir returns the state directory the store reads and writes. An empty
+// string means the store was built without a directory (DefaultDir must
+// be used instead); callers use it to locate sibling state-dir files
+// such as the force-recollect journal.
+func (s Store) Dir() string { return s.dir }
 
 func DefaultDir() (string, error) {
 	if v := strings.TrimSpace(os.Getenv("TOKTRAIL_HOME")); v != "" {

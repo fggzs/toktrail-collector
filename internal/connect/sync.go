@@ -583,6 +583,15 @@ func Sync(ctx context.Context, opt SyncOptions) (SyncResult, error) {
 	if stateDir == "" {
 		return SyncResult{}, errors.New("collector state directory is required")
 	}
+	// Force-recollect journal guard, before any collection round,
+	// backlog pass, history retransmission, dry-run plan or lock
+	// handoff consumes the state: while a reset is in flight, the sync
+	// orchestration stops with the sentinel instead of reading sources
+	// or moving old-epoch batches around. Only the recollect driver
+	// continues, through syncclient under its journal's request id.
+	if err := syncclient.CheckResetJournal(stateDir); err != nil {
+		return SyncResult{}, err
+	}
 	out := opt.Out
 	if out == nil {
 		out = io.Discard
