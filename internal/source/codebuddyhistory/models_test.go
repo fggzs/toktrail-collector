@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -295,20 +296,87 @@ func TestLoadRecordsQuarantinesRequestsWithoutTimestamp(t *testing.T) {
 	}
 }
 
-func TestLoadRecordsTreatsMissingCacheSplitAsUncached(t *testing.T) {
-	root := t.TempDir()
-	conversationFixture(t, root, "p1", "c1", `{"requests":[{"id":"r1","state":"complete","startedAt":1791014053528,"usage":{"inputTokens":100,"outputTokens":10,"totalTokens":110}}]}`)
+func TestLoadRecordsQuarantinesMissingCacheSplit(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		usage string
+	}{
+		{"missing fields", `{"inputTokens":100,"outputTokens":10,"totalTokens":110}`},
+		{"explicit null fields", `{"inputTokens":100,"outputTokens":10,"totalTokens":110,"cacheTokens":null,"cachedWriteTokens":null,"cachedMissTokens":null}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			conversationFixture(t, root, "p1", "c1", `{"requests":[{"id":"r1","state":"complete","startedAt":1791014053528,"usage":`+tc.usage+`}]}`)
+			result, err := LoadRecords(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(result.Records) != 0 || result.Quarantined != 1 {
+				t.Fatalf("unknown cache split must not invent definite zero counters: %#v", result)
+			}
+		})
+	}
+}
 
-	result, err := LoadRecords(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(result.Records) != 1 || result.Quarantined != 0 {
-		t.Fatalf("legacy usage must export without quarantine: %#v", result)
-	}
-	record := result.Records[0]
-	if record["input"] != "100" || record["cacheRead"] != "0" || record["cacheWrite"] != "0" || record["output"] != "10" {
-		t.Fatalf("legacy usage must be fully uncached: %#v", record)
+func TestLoadRecordsModelProbeBudgetRequiresCompleteAttribution(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		count         int
+		firstRequest  string
+		firstModel    string
+		missingFirst  bool
+		wantModel     string
+	}{
+		{"within budget matching models", 64, "r1", "B", false, "B"},
+		{"within budget mixed models", 64, "r1", "A", false, codebuddyUnknownModel},
+		{"within budget foreign prefix", 64, "r0", "A", false, "B"},
+		{"over budget mixed models", 65, "r1", "A", false, codebuddyUnknownModel},
+		{"over budget matching models", 65, "r1", "B", false, codebuddyUnknownModel},
+		{"over budget foreign prefix", 65, "r0", "A", false, codebuddyUnknownModel},
+		{"over budget unreadable prefix", 65, "r1", "A", true, codebuddyUnknownModel},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			ids := make([]string, tc.count)
+			for i := range ids {
+				ids[i] = fmt.Sprintf("m%d", i)
+			}
+			index, err := json.Marshal(map[string]any{
+				"requests": []map[string]any{{
+					"id": "r1", "messages": ids, "state": "complete", "startedAt": 1791014053528,
+					"usage": map[string]any{"inputTokens": 100, "outputTokens": 10, "totalTokens": 110,
+						"cacheTokens": 40, "cachedWriteTokens": 0, "cachedMissTokens": 60},
+				}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			indexPath := conversationFixture(t, root, "p1", "c1", string(index))
+			for i, id := range ids {
+				if i == 0 && tc.missingFirst {
+					writeFixture(t, filepath.Join(filepath.Dir(indexPath), messagesDirName, id+".json"), "invalid json")
+					continue
+				}
+				request, model := "r1", "B"
+				if i == 0 {
+					request, model = tc.firstRequest, tc.firstModel
+				}
+				messageFixture(t, indexPath, id, "assistant", extraFixture(t, request, model))
+			}
+			result, err := LoadRecords(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(result.Records) != 1 || result.Quarantined != 0 {
+				t.Fatalf("usage must export regardless of model attribution: %#v", result)
+			}
+			if got := result.Records[0]["model"]; got != tc.wantModel {
+				t.Fatalf("model = %v, want %q", got, tc.wantModel)
+			}
+			if result.Records[0]["input"] != "60" || result.Records[0]["cacheRead"] != "40" {
+				t.Fatalf("known cache split changed: %#v", result.Records[0])
+			}
+		})
 	}
 }
 

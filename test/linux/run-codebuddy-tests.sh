@@ -6,7 +6,7 @@
 #   2. 目录级授权扫描：records/quarantined 计数
 #   3. 模型归属：assistant 消息归属 + requestId 自证的 user 消息兜底
 #   4. 缺失 startedAt 的请求被隔离（不再用消息文件 mtime 兜底）
-#   5. 三个缓存字段全部缺失的旧格式请求按全非缓存计入
+#   5. 三个缓存字段全部缺失的旧格式请求被隔离
 #   6. streaming / 全零 usage 行静默跳过
 #   7. 单文件授权不读兄弟消息文件（模型回落 unknown）
 #
@@ -96,28 +96,27 @@ JSON
 echo "== 目录级扫描: $data"
 scan_out=$("$bin" scan --source codebuddy-history --input "$data" --state-dir "$state")
 printf '%s\n' "$scan_out" | grep -E 'source=|quarantined=|issue\[' || true
-check "records" 3 "$(field "$scan_out" records)"
-check "valid" 3 "$(field "$scan_out" valid)"
-check "quarantined" 1 "$(field "$scan_out" quarantined)"
+check "records" 2 "$(field "$scan_out" records)"
+check "valid" 2 "$(field "$scan_out" valid)"
+check "quarantined" 2 "$(field "$scan_out" quarantined)"
 
 echo "== 导出批次"
 batch=$work/batch.json
 export_out=$("$bin" export --source codebuddy-history --input "$data" --out "$batch" --batch test-1 --state-dir "$state")
 printf '%s\n' "$export_out" | head -n 3
-check "batch records" 3 "$(grep -o '"recordKey"' "$batch" | wc -l | tr -d ' ')"
+check "batch records" 2 "$(grep -o '"recordKey"' "$batch" | wc -l | tr -d ' ')"
 check "assistant 归属" 1 "$(grep -c 'hy4-preview-ioa' "$batch" || true)"
 check "user 兜底归属" 1 "$(grep -c 'glm-5.2' "$batch" || true)"
-check "旧格式全部非缓存" 1 "$(grep -c '"input": "100"' "$batch" || true)"
-check "旧格式模型不作猜测" 1 "$(grep -c '"model": "unknown"' "$batch" || true)"
+check "没有 unknown 模型" 0 "$(grep -c '"model": "unknown"' "$batch" || true)"
 
 echo "== 单文件授权只读该索引"
 state2=$work/state-single
 mkdir -p "$state2"
 single_out=$("$bin" scan --source codebuddy-history --input "$conv/index.json" --state-dir "$state2")
-check "单文件 records" 3 "$(field "$single_out" records)"
+check "单文件 records" 2 "$(field "$single_out" records)"
 single_batch=$work/single.json
 "$bin" export --source codebuddy-history --input "$conv/index.json" --out "$single_batch" --batch test-2 --state-dir "$state2" >/dev/null
-check "单文件模型回落 unknown" 3 "$(grep -c '"model": "unknown"' "$single_batch" || true)"
+check "单文件模型回落 unknown" 2 "$(grep -c '"model": "unknown"' "$single_batch" || true)"
 
 echo "== 版本与帮助"
 ver=$("$bin" version)

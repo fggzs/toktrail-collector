@@ -33,9 +33,9 @@
 //     cachedMissTokens is read as "not reported", never as "the whole prompt is
 //     uncached"; no recorded row reports cache reads with a zero miss count.
 //   - totalTokens is inputTokens + outputTokens when present.
-//   - Legacy rows with no cache split fields are treated as entirely
-//     uncached (cacheRead=0, cacheWrite=0). Partially recorded splits are
-//     quarantined rather than discarding a cache share that was recorded.
+//   - Rows without a recorded cache-read or cache-write counter are
+//     quarantined: missing and null fields do not prove a zero cache share.
+//     Partial splits are quarantined for the same reason.
 //
 // The record uploads the uncached prompt as "input", the cached share as
 // "cacheRead" and the cache-write share as "cacheWrite" (the same
@@ -525,12 +525,8 @@ func normalizeUsage(u *requestUsage) (usageCounts, string) {
 	if !ok {
 		return counts, "invalid cachedMissTokens"
 	}
-	if !cachePresent && !writePresent && !missPresent {
-		// Older clients recorded the total prompt without a cache breakdown.
-		// Count the whole prompt as uncached, as with an all-zero split.
-		cacheRead, cacheWrite = 0, 0
-	} else if !cachePresent || !writePresent {
-		// A partial split must not discard cache usage that was recorded.
+	if !cachePresent || !writePresent {
+		// An absent split does not prove that the cached shares were zero.
 		return counts, "completed request without a recorded cache split"
 	}
 	// The recorded split is three-way: inputTokens is the cache-read share plus
@@ -681,12 +677,9 @@ func (l *modelLookup) attribute(req indexRequest) (string, string, string) {
 		return codebuddyUnknownModel, "", "request model not recorded; model reported unknown"
 	}
 	if len(ids) > maxModelProbes {
-		// requests[].messages carries the turn's whole context, so a long
-		// conversation names hundreds of files. The older entries belong to
-		// earlier requests, whose extra.requestId never matches this turn
-		// and is skipped anyway, so probing the newest tail bounds the
-		// per-request I/O without guessing at attribution.
-		ids = ids[len(ids)-maxModelProbes:]
+		// An unchecked prefix may contain messages from this request with
+		// a different model. Never attribute the whole turn from a subset.
+		return codebuddyUnknownModel, "", "request lists more messages than can be inspected; model reported unknown"
 	}
 	resolved := ""
 	for _, id := range ids {
