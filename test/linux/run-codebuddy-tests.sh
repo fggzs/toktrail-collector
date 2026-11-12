@@ -6,7 +6,7 @@
 #   2. 目录级授权扫描：records/quarantined 计数
 #   3. 模型归属：assistant 消息归属 + requestId 自证的 user 消息兜底
 #   4. 缺失 startedAt 的请求被隔离（不再用消息文件 mtime 兜底）
-#   5. 缺失缓存拆分的请求被隔离
+#   5. 三个缓存字段全部缺失的旧格式请求被隔离
 #   6. streaming / 全零 usage 行静默跳过
 #   7. 单文件授权不读兄弟消息文件（模型回落 unknown）
 #

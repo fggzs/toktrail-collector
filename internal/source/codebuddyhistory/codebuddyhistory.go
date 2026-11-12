@@ -33,10 +33,9 @@
 //     cachedMissTokens is read as "not reported", never as "the whole prompt is
 //     uncached"; no recorded row reports cache reads with a zero miss count.
 //   - totalTokens is inputTokens + outputTokens when present.
-//   - A row that records the prompt but omits cacheTokens or
-//     cachedWriteTokens only proves the total prompt: it does not prove those
-//     shares were zero, so the request is quarantined instead of exported
-//     with an invented split.
+//   - Rows without a recorded cache-read or cache-write counter are
+//     quarantined: missing and null fields do not prove a zero cache share.
+//     Partial splits are quarantined for the same reason.
 //
 // The record uploads the uncached prompt as "input", the cached share as
 // "cacheRead" and the cache-write share as "cacheWrite" (the same
@@ -148,7 +147,11 @@ const (
 	// tool-output-heavy messages above this size contribute no model.
 	maxMessageBytes = 2 << 20
 	// maxModelProbes bounds how many message files one request may probe.
-	maxModelProbes = 8
+	// requests[].messages lists the turn's whole context, so a long
+	// conversation names far more files than a short one: at 8 nearly
+	// every long turn reported "unknown" even though the model was
+	// recorded. The bound only limits I/O per request, not correctness.
+	maxModelProbes = 64
 	// safeIntegerLimit separates second and millisecond startedAt values.
 	safeIntegerLimit = 10000000000
 )
@@ -518,15 +521,13 @@ func normalizeUsage(u *requestUsage) (usageCounts, string) {
 	if !ok {
 		return counts, "invalid cachedWriteTokens"
 	}
-	if !cachePresent || !writePresent {
-		// A row that records the prompt but omits the split only proves
-		// totalTokens worth of prompt: exporting cacheRead=0/cacheWrite=0
-		// would invent a breakdown nobody recorded.
-		return counts, "completed request without a recorded cache split"
-	}
 	cacheMiss, missPresent, ok := countValue(u.CachedMissTokens)
 	if !ok {
 		return counts, "invalid cachedMissTokens"
+	}
+	if !cachePresent || !writePresent {
+		// An absent split does not prove that the cached shares were zero.
+		return counts, "completed request without a recorded cache split"
 	}
 	// The recorded split is three-way: inputTokens is the cache-read share plus
 	// the cache-write share plus the uncached share. Verified against real
@@ -676,6 +677,8 @@ func (l *modelLookup) attribute(req indexRequest) (string, string, string) {
 		return codebuddyUnknownModel, "", "request model not recorded; model reported unknown"
 	}
 	if len(ids) > maxModelProbes {
+		// An unchecked prefix may contain messages from this request with
+		// a different model. Never attribute the whole turn from a subset.
 		return codebuddyUnknownModel, "", "request lists more messages than can be inspected; model reported unknown"
 	}
 	resolved := ""
